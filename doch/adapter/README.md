@@ -60,23 +60,36 @@ Diagnostic           # Any tool → Report: raw output, warnings, metadata
 
 Every adapter must implement three methods:
 
-### `probe(target, invariant, constraints, sequence_prefix, chain) → list[Candidate]`
+### `probe(target, invariant, constraints, global_state, chain) → Outcome`
 
-Run the tool in **exploration mode** on one chain. Given the current search state and chain context, ask the tool: "what are the most suspicious next steps on this chain?" The tool returns ranked candidates.
+Run the tool in **exploration mode** on one chain. Given the current global state and chain context, return a typed `Outcome`. On success, the outcome carries a list of `Candidate` structs. The adapter translates the tool's native format into the harness' outcome types.
 
-For cross-chain probing, constraints may include `CROSS_CHAIN` conditions that reference the other chain's state. The adapter translates these into concrete preconditions on its chain — for example, a constraint that "source chain emitted TokensLocked(100)" becomes "mock relayer delivers a message with amount=100" on the destination chain.
+For cross-chain probing, the `global_state` includes `pending_messages` from the source chain. The adapter resolves `CROSS_CHAIN` constraints through the message lifecycle.
 
 ### `execute(target, sequence, constraints, chain) → ExecutionResult`
 
-Run the tool in **execution mode** on one chain. Execute a concrete call sequence against the target contract deployed on the specified chain. This is the combined reachability-check + invariant-check step.
+Run the tool in **execution mode** on one chain. Execute a concrete call sequence and return a structured result.
 
-For cross-chain sequences, the harness' mock relayer feeds events from the source chain into the destination chain's adapter. The adapter itself only sees its own chain.
+```
+ExecutionResult:
+    reachable: bool                   # did the sequence execute without unexpected revert?
+    revert_reason: Optional[str]      # if reverted, why
+    outcome: Outcome                  # Success | Counterexample | Timeout | ToolError | ...
+    before_state: Snapshot            # contract state before execution
+    after_state: Snapshot             # contract state after execution
+    events: list[Event]               # emitted events (including cross-chain)
+    correlation_value: Optional[bytes32]  # extracted from cross-chain event, if any
+```
 
-### `confirm(target, sequence, constraints, chain, expected_result) → bool`
+For cross-chain sequences, the adapter extracts the correlation value from emitted events using the invariant's `CorrelationExtractor`.
 
-Run the tool in **verification mode** on one chain. Independently verify an edge case found by another tool on the same chain. Must use a different analysis method than the original probe.
+### `confirm(target, witness, chain) → Outcome`
 
-Returns `True` if the tool confirms the finding under the bounds and assumptions used, `False` otherwise.
+Run the tool in **verification mode** on one chain. Given a `WitnessState` found by another tool, independently verify it. The confirmation must attempt to **reproduce the violation** — not check that the invariant holds. If the witness carries a counterexample, confirming it means reproducing that counterexample.
+
+Returns a typed `Outcome`. Symbolic tools (Halmos) return `Counterexample` with a matching model or `UnsatUnderBounds` if the witness cannot be reproduced under the bounds. Fuzzing tools (Echidna) return `Counterexample` if the violation is reproduced across parameter variations.
+
+Must use a different analysis method than the original probe to qualify as independent confirmation.
 
 ---
 
@@ -92,7 +105,7 @@ Echidna is a fuzzer. Best suited for concrete sequence exploration and boundary 
 
 **Execute mode:** Replay a specific call sequence through Echidna's concrete execution engine. Forward cross-chain events to the mock relayer for the other chain's adapter.
 
-**Confirm mode:** Re-run fuzzing with the edge case sequence as seed, varying parameters. If the sub-invariant holds across variations, the edge case is robust.
+**Confirm mode:** Re-run fuzzing with the witness sequence as seed, varying parameters. The goal is to **reproduce the violation**, not to check that the invariant holds. If the fuzzer finds the invariant still broken across parameter variations, return `Counterexample` — the witness is independently confirmed. If the fuzzer cannot reproduce the violation within the budget, return `UnsatUnderBounds` (the witness may be a fluke or need tighter constraints).
 
 ### Halmos Adapter
 

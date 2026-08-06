@@ -9,15 +9,14 @@ Astarots is invoked from the command line. Cross-chain invariant testing require
 Given a Foundry project with bridge contracts on Ethereum and Polygon, and invariants at `test/invariants/BridgeInvariants.t.sol`:
 
 ```bash
-# Step 1: Register chains
-astarots chain add ethereum --rpc $ETH_RPC_URL --chain-id 1
-astarots chain add polygon  --rpc $POLY_RPC_URL --chain-id 137
+# Step 1: Register chains (secrets via env vars, never inlined)
+astarots chain add ethereum --rpc "$ETH_RPC_URL" --chain-id 1
+astarots chain add polygon  --rpc "$POLY_RPC_URL" --chain-id 137
 
 # Step 2: Run probe (explicit chain-to-contract binding)
 astarots probe \
     --target ethereum=src/BridgeEth.sol \
     --target polygon=src/BridgePoly.sol \
-    --chains ethereum,polygon \
     --invariants test/invariants/ \
     --tools echidna,halmos,slither \
     --max-depth 4
@@ -58,7 +57,6 @@ Options:
   --target CHAIN=CONTRACT    Explicit chain-to-contract binding, repeatable
                               e.g. --target ethereum=src/BridgeEth.sol
   --invariants PATH          Directory containing .t.sol invariant files
-  --chains LIST              Comma-separated chain aliases, e.g. "ethereum,polygon"
   --tools LIST               Comma-separated tool names (default: echidna,halmos,slither)
   --max-depth N              Maximum search depth per chain (default: 4)
   --beam LIST                Beam widths per depth, e.g. "4,3,2,1" (default: adaptive)
@@ -142,10 +140,10 @@ Configuration is resolved in this order, with later sources overriding earlier o
 | Code | Meaning |
 |---|---|
 | 0 | No violations found (verdict: not-observed for all invariants) |
-| 1 | Violation found (verdict: violated for at least one invariant) |
-| 2 | Inconclusive (timeout, tool error, or incomplete search) |
-| 3 | Invalid configuration (missing chains, invalid invariant IR, etc.) |
-| 4 | Tool execution error (all probes failed) |
+| 1 | Violation found (verdict: violated for at least one invariant, regardless of other results) |
+| 2 | Inconclusive (no violation found, but at least one invariant was inconclusive — timeout, partial, or tool error) |
+| 3 | Invalid configuration (missing chains, invalid invariant IR, missing NatSpec metadata) |
+| 4 | Tool execution error (all probes failed — no results at all) |
 
 ---
 
@@ -210,7 +208,6 @@ For repeated runs, create `astarots.toml`:
 ```toml
 [default]
 invariants = "test/invariants/"
-chains = ["ethereum", "polygon"]
 tools = ["echidna", "halmos", "slither"]
 max_depth = 4
 beam_widths = [4, 3, 2, 1]
@@ -275,7 +272,7 @@ Constraints:
   • 7 signatures from rotated-out guardians still accepted
 ```
 
-Per-chain traces are labeled with `[chain]` annotations. The cross-chain correlation section shows how findings on two independent chains combine into a protocol-level vulnerability.
+Per-chain traces are labeled with `[chain]` annotations. The cross-chain correlation section shows how findings on two causally coordinated chains combine into a protocol-level vulnerability.
 
 ---
 

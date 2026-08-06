@@ -2,164 +2,51 @@
 
 The core algorithm searches for the deepest edge case that violates a cross-chain invariant. "Deepest" means the violation requiring the most specific accumulated constraints across multiple chains — the one that would be invisible to any single-chain analysis.
 
-The algorithm has two layers: an **outer decomposition loop** that splits the cross-chain invariant into per-chain sub-invariants, and an **inner beam search** that probes each chain independently. The outer loop uses a **message coordinator** to manage causal dependencies between chains.
+The algorithm uses a **unified frontier** across all chains. Each search state is an immutable, branch-local snapshot of both chains. The frontier expands states in causal order: source-chain steps that emit messages precede destination-chain steps that consume them. There is no separate per-chain search followed by Cartesian recombination — that approach can combine states from causally impossible branches.
 
 ---
 
-## Global Search State
+## Global Search State (Branch-Local)
 
-A cross-chain search operates on a shared global state that tracks both chains' snapshots and in-flight messages:
+Each node in the search tree carries an immutable copy of the global state — not a shared mutable reference. This prevents branches from interfering with each other:
 
 ```
 GlobalState:
-    chain_snapshots: Map[ChainId, Snapshot]   # per-chain storage state
+    chain_snapshots: Map[ChainId, Snapshot]   # immutable per-chain storage
     pending_messages: OrderedQueue[Message]   # emitted, not yet delivered
-    trace: list[CrossChainStep]               # ordered execution trace
+    trace: list[CrossChainStep]               # ordered causal execution trace
     assumptions: list[Assumption]             # scope assumptions in effect
     budget_used: int                          # states consumed so far
+
+Snapshot:
+    chain_id: ChainId
+    contract_states: Map[ContractId, Storage] # storage per contract
+    block_number: int
+    timestamp: int
 ```
 
-The global state is the single source of truth for what has happened across both chains. It serializes the causal order: source-chain steps that emit messages appear before the destination-chain steps that consume them.
+When a branch expands, it copies the global state (structural sharing where possible) and applies the new step. Branches are isolated — a message delivered in one branch does not affect another.
 
 ---
 
-## Outer Loop: Cross-Chain Decomposition
+## Unified Frontier
+
+The frontier is a single priority queue holding `SearchState` nodes. Each node belongs to exactly one chain context (the chain where the next action executes), but the global state spans all chains. The frontier naturally respects causal order: source-chain states that emit messages are expanded before the destination-chain states that consume them, because the message coordinator enforces `Delivered` status before destination execution.
 
 ```
-find_crosschain_edge(targets, invariant, max_depth=4, budget=200):
-    # targets = {src_chain: Contract, dst_chain: Contract, ...}
-
-    # STEP 1: Decompose the cross-chain invariant
-    sub_invariants = decompose(invariant, targets)
-    # Uses invariant IR metadata:
-    #   correlation_key: messageHash
-    #   observation_policy: AFTER_ALL_DELIVERED
-    #   assumptions: guardian_honesty(at_most_6_malicious)
-
-    # STEP 2: Run per-chain beam search with causal coordination
-    per_chain_results: Map[ChainId, SearchResult] = {}
-    coordinator = MessageCoordinator(invariant.assumptions)
-
-    for chain, sub_inv in sub_invariants.items():
-        per_chain_results[chain] = deepest_edge(
-            target=targets[chain],
-            invariant=sub_inv,
-            chain=chain,
-            max_depth=max_depth,
-            budget=budget,
-            coordinator=coordinator,
-        )
-
-    # STEP 3: Recombine — merge per-chain SearchResults
-    cross_edges = recombine(
-        invariant=invariant,
-        per_chain_results=per_chain_results,
-        targets=targets,
-    )
-
-    return cross_edges
-```
-
-The decomposer is guided by the invariant IR's metadata. It does **not** invent semantics — it uses the developer-provided correlation key, observation policy, and assumptions. Missing metadata is a hard error.
-
----
-
-## Inner Loop: Per-Chain Beam Search
-
-The per-chain search receives a `chain` context and access to the global coordinator. Constraints that reference the other chain's state are resolved through the coordinator's message lifecycle.
-
-### SearchState (Cross-Chain Extension)
-
-```
-SearchState:
-    constraints: list[Constraint]   # accumulated preconditions
-    sequence: list[Call]            # call sequence explored so far
-    evidence: list[Evidence]        # tool outputs supporting this path
-    depth: int                      # current depth in search tree
-    chain: str                      # which chain this search operates on
-```
-
-`constraints` are additive — each new depth appends, never replaces. Cross-chain constraints can reference the other chain's state through `CROSS_CHAIN` constraints, resolved by the coordinator.
-
-### Search Strategy
-
-The algorithm uses **per-state adaptive beam search**: at each depth, the top N candidates from each parent state are expanded. This is a branching cap per parent over a persistent best-first frontier — not classic global beam search. Each parent produces up to `beam_width` children.
-
-| Depth | Beam Width | Rationale |
-|---|---|---|
-| 0 → 1 | 4 | Broad exploration — which entry points interact with cross-chain state? |
-| 1 → 2 | 3 | Narrow toward suspicious cross-chain interaction chains |
-| 2 → 3 | 2 | Focus on two most promising constraint sets |
-| 3 → 4 | 1 | Commit to one path, go as deep as constraints allow |
-
-A hard cap on total states (`budget`, default 200) per chain prevents unbounded growth.
-
-### Core Structures
-
-**Constraint:**
-
-```
-Constraint:
-    kind:   FUNCTION | STATE_VAR | TIMING | EXTERNAL_CALL | ACCESS | CROSS_CHAIN
-    target: str            # function name, state variable, contract address
-    value:  Any            # the constrained value or range
-    chain:  str            # which chain this constraint applies to
-    source: str            # which tool produced this constraint
-```
-
-**Candidate:**
-
-```
-Candidate:
-    target_function: str
-    pre_conditions: list[Constraint]
-    suspicion: float          # 0.0–1.0
-    evidence: Evidence
-    call_sequence: list[Call]
-    chain: str
-```
-
-**EdgeCase:**
-
-```
-EdgeCase:
-    depth: int
-    sequence: list[Call]              # ordered calls that trigger the violation
-    constraints: list[Constraint]     # exact preconditions required
-    evidence: list[Evidence]          # tool-by-tool supporting data
-    impact: Impact                    # what breaks and how badly
-    independently_confirmed: bool     # verified by a second tool
-    confidence: "proven" | "reproduced"
-    chains: list[str]                 # which chains are involved
-```
-
-**SearchResult:**
-
-The per-chain scheduler returns a `SearchResult`, not a single `EdgeCase`. The recombiner needs all reachable candidates, not just violations — a state that is valid in isolation may combine with another chain's state to violate the cross-chain property.
-
-```
-SearchResult:
-    candidates: list[Candidate]       # all reachable candidates explored
-    local_findings: list[EdgeCase]    # violations found on this chain
-    exhausted: bool                   # true if search hit budget/depth limit
-    outcome: Outcome                  # violated | not_observed | inconclusive
-```
-
-### Main Loop
-
-```
-deepest_edge(target, invariant, chain, max_depth=4, budget=200,
-             coordinator=None):
-    state_budget = budget
+unified_search(targets, invariant, max_depth=4, budget=200):
     frontier = PriorityQueue()
-    # Priority ordering: higher suspicion first.
-    # Tie-breaking: shallower depth first (shallower violations
-    # are easier to reproduce and understand).
-    frontier.push(SearchState.empty(chain=chain), priority=0)
+    # Priority: higher suspicion first. Tie-breaking: shallower depth.
+    initial = SearchState(
+        global_state=GlobalState.initial(targets),
+        chain_context="ethereum",    # start on source chain
+        depth=0,
+    )
+    frontier.push(initial, priority=0)
     visited = set()
     deepest = None
-    all_candidates = []
-    all_findings = []
+    all_witnesses = []
+    state_budget = budget
 
     while frontier is not empty AND state_budget > 0:
         state = frontier.pop()
@@ -168,14 +55,14 @@ deepest_edge(target, invariant, chain, max_depth=4, budget=200,
             continue
 
         beam_width = adaptive_width(state.depth)
+        chain = state.chain_context
 
         candidates = probe(
-            target=target,
-            invariant=invariant,
+            target=targets[chain],
+            invariant=invariant.sub_invariant(chain),
             constraints=state.constraints,
-            sequence_prefix=state.sequence,
+            global_state=state.global_state,
             chain=chain,
-            coordinator=coordinator,
         )
 
         ranked = rank_by_suspicion(candidates)
@@ -186,74 +73,92 @@ deepest_edge(target, invariant, chain, max_depth=4, budget=200,
             if not constraints_are_consistent(state.constraints, extracted):
                 continue
 
-            next_state = SearchState(
-                constraints = state.constraints + extracted,
-                sequence    = state.sequence + cand.call_sequence,
-                evidence    = state.evidence + [cand.evidence],
-                depth       = state.depth + 1,
-                chain       = chain,
-            )
-
-            # Canonical state key for deduplication.
-            # Minimizes storage values to canonical form before hashing.
-            state_key = canonical_hash(next_state)
-            if state_key in visited:
-                continue
-            visited.add(state_key)
-
-            result = execute_sequence(
-                target=target,
-                sequence=next_state.sequence,
-                constraints=next_state.constraints,
+            # Apply step to a COPY of the global state
+            next_global = state.global_state.copy()
+            result = apply_step(
+                global_state=next_global,
+                step=cand,
                 chain=chain,
-                coordinator=coordinator,
             )
+
+            if result.outcome == "inconclusive":
+                # Timeout or out-of-gas during execution.
+                # Record as witness but mark as inconclusive —
+                # we don't know if this path is reachable.
+                all_witnesses.append(WitnessState(
+                    snapshot=next_global,
+                    correlation_value=extract_correlation(cand, invariant),
+                    chain=chain,
+                    status="inconclusive",
+                ))
+                continue
 
             if not result.reachable:
                 continue
 
+            # Record witness with snapshot and correlation value
+            witness = WitnessState(
+                snapshot=next_global,
+                correlation_value=extract_correlation(cand, invariant),
+                chain=chain,
+                call_sequence=state.sequence + cand.call_sequence,
+                constraints=state.constraints + extracted,
+                evidence=state.evidence + [cand.evidence],
+                status="reachable",
+            )
+
+            state_key = canonical_hash(witness)
+            if state_key in visited:
+                continue
+            visited.add(state_key)
+
+            all_witnesses.append(witness)
+
+            # Check invariant against this witness
             invariant_broken = not invariant.check(
-                result.before_state,
-                result.after_state,
+                witness.snapshot,
             )
 
             if invariant_broken:
-                # Resolve confirmation BEFORE constructing EdgeCase.
-                # The original code referenced edge.independently_confirmed
-                # while edge was still being constructed (use-before-def).
                 confirmed = confirm_with_second_tool(
-                    target, next_state, chain
+                    target, witness, chain
                 )
                 edge = EdgeCase(
-                    depth=next_state.depth,
-                    sequence=next_state.sequence,
-                    constraints=next_state.constraints,
-                    evidence=next_state.evidence,
-                    impact=result.impact,
-                    chains=[chain],
+                    depth=state.depth + 1,
+                    witnesses=[witness],
                     independently_confirmed=confirmed,
-                    confidence="proven" if confirmed else "reproduced",
+                    evidence_strength=(
+                        "symbolically-confirmed" if confirmed
+                        else "observed"
+                    ),
                 )
 
-                all_findings.append(edge)
-                all_candidates.append(edge)
                 if deepest is None or edge.depth > deepest.depth:
                     deepest = edge
-            else:
-                # Record candidate even if invariant didn't break.
-                # Valid intermediate states may still contribute to
-                # cross-chain violations at recombination.
-                all_candidates.append(cand)
 
-            # Always push — continue exploring even after finding
-            # a violation. Deeper edge cases may exist.
+            # Determine next chain context
+            next_chain = coordinator.next_chain(
+                current=chain,
+                result=result,
+                invariant=invariant,
+            )
+
+            next_state = SearchState(
+                global_state=next_global,
+                chain_context=next_chain or chain,
+                constraints=state.constraints + extracted,
+                sequence=state.sequence + cand.call_sequence,
+                evidence=state.evidence + [cand.evidence],
+                depth=state.depth + 1,
+            )
+
             frontier.push(next_state, priority=cand.suspicion)
 
         state_budget -= 1
 
     return SearchResult(
-        candidates=all_candidates,
-        local_findings=all_findings,
+        witnesses=all_witnesses,
+        deepest_edge=deepest,
         exhausted=(state_budget <= 0),
         outcome=(
             "violated" if deepest else
@@ -265,85 +170,167 @@ deepest_edge(target, invariant, chain, max_depth=4, budget=200,
 
 ---
 
-## Cross-Chain Recombination
+## Core Structures
 
-After per-chain searches complete, the recombiner checks the full cross-chain invariant. It operates on `SearchResult` structs — pairing per-chain candidates, not just per-chain violations:
+### SearchState
 
 ```
-recombine(invariant, per_chain_results, targets):
-    cross_edges = []
-
-    # Pair per-chain candidates by the invariant's correlation_key
-    for src_cand in per_chain_results[src_chain].candidates:
-        for dst_cand in per_chain_results[dst_chain].candidates:
-            if not correlated(src_cand, dst_cand, invariant.correlation_key):
-                continue
-
-            combined = CrossChainEdgeCase(
-                chains=[src_chain, dst_chain],
-                sequence = src_cand.call_sequence + dst_cand.call_sequence,
-                constraints = (
-                    src_cand.pre_conditions + dst_cand.pre_conditions
-                ),
-                cross_violation = not invariant.cross_check(
-                    src_cand, dst_cand,
-                ),
-            )
-
-            if combined.cross_violation:
-                cross_edges.append(combined)
-
-    return cross_edges
+SearchState:
+    global_state: GlobalState          # immutable branch-local snapshot
+    chain_context: ChainId             # which chain the NEXT action targets
+    constraints: list[Constraint]      # accumulated preconditions
+    sequence: list[Call]               # call sequence explored so far
+    evidence: list[Evidence]           # tool outputs supporting this path
+    depth: int                         # current depth in search tree
 ```
 
-A cross-chain edge case is typically deeper than any per-chain finding alone — it emerges from the interaction between two chains, each of which appeared safe in isolation.
+### WitnessState
+
+A recorded intermediate state with its correlation value. The search retains witnesses even when the local invariant does not break — two witnesses from different chains that share a correlation value may together violate the cross-chain property:
+
+```
+WitnessState:
+    snapshot: GlobalState              # full chain state at this point
+    correlation_value: bytes32         # extracted via CorrelationExtractor
+    chain: ChainId
+    call_sequence: list[Call]
+    constraints: list[Constraint]
+    evidence: list[Evidence]
+    status: "reachable" | "inconclusive"
+```
+
+### EdgeCase
+
+```
+EdgeCase:
+    depth: int
+    witnesses: list[WitnessState]      # one per chain involved
+    independently_confirmed: bool
+    evidence_strength: "observed" | "replayed" | "symbolically-confirmed"
+    impact: Impact
+    chains: list[ChainId]
+```
+
+### SearchResult
+
+```
+SearchResult:
+    witnesses: list[WitnessState]      # all recorded witnesses across chains
+    deepest_edge: Optional[EdgeCase]   # deepest violation found, if any
+    exhausted: bool
+    outcome: "violated" | "not_observed" | "inconclusive"
+```
+
+### Constraint
+
+```
+Constraint:
+    kind:   FUNCTION | STATE_VAR | TIMING | EXTERNAL_CALL | ACCESS | CROSS_CHAIN
+    target: str            # function name, state variable, contract address
+    value:  Any            # the constrained value or range
+    chain:  ChainId        # which chain this constraint applies to
+    source: str            # which tool produced this constraint
+```
+
+### Candidate
+
+```
+Candidate:
+    target_function: str
+    call_sequence: list[Call]
+    pre_conditions: list[Constraint]
+    suspicion: float          # 0.0–1.0
+    evidence: Evidence
+    chain: ChainId
+```
 
 ---
 
-## Ranking: `rank_by_suspicion` (Cross-Chain Weighting)
+## Cross-Chain Witness Correlation
 
-The suspicion score for cross-chain probing adds weights for cross-chain-specific signals:
+After the unified search completes, cross-chain violations are detected by correlating witnesses — not by Cartesian product of per-chain results:
+
+```
+find_cross_violations(witnesses, invariant):
+    # Group witnesses by correlation value
+    by_correlation: Map[bytes32, list[WitnessState]] = {}
+    for w in witnesses:
+        by_correlation[w.correlation_value].append(w)
+
+    violations = []
+    for corr_val, group in by_correlation.items():
+        # Need at least one witness per chain
+        chains_present = {w.chain for w in group}
+        if len(chains_present) < len(invariant.contexts):
+            continue
+
+        # Check cross-chain predicate against paired snapshots
+        for src in group:
+            if src.chain != invariant.source_chain:
+                continue
+            for dst in group:
+                if dst.chain != invariant.destination_chain:
+                    continue
+                if not invariant.cross_check(src.snapshot, dst.snapshot):
+                    violations.append(CrossChainViolation(
+                        source_witness=src,
+                        dest_witness=dst,
+                        correlation_value=corr_val,
+                    ))
+
+    return violations
+```
+
+This only pairs witnesses that share a correlation value and were actually reached during the same unified search — no combination of causally impossible states.
+
+---
+
+## Search Strategy
+
+The algorithm uses **per-state adaptive beam search**: at each depth, the top N candidates from each parent state are expanded.
+
+| Depth | Beam Width | Rationale |
+|---|---|---|
+| 0 → 1 | 4 | Broad exploration |
+| 1 → 2 | 3 | Narrow toward suspicious paths |
+| 2 → 3 | 2 | Focus on best constraint sets |
+| 3 → 4 | 1 | Commit to deepest exploration |
+
+A hard cap on total states (`budget`, default 200) across all chains prevents unbounded growth.
+
+---
+
+## Ranking: `rank_by_suspicion`
 
 ```
 suspicion(candidate) =
     0.30 × storage_touch_score +
     0.20 × access_gap_score +
-    0.20 × cross_chain_interaction_score +  # touches cross-chain state or events
+    0.20 × cross_chain_interaction_score +
     0.15 × dependency_depth_score +
     0.10 × tool_confidence_score +
     0.05 × prior_violation_proximity
 ```
 
-The `cross_chain_interaction_score` increases when a candidate function emits cross-chain events, reads message state, or interacts with the relayer — these are the highest-value targets.
-
-Weights are initial estimates and should be tuned against real audit data.
-
 ---
 
 ## Frontier Ordering
 
-The frontier is a priority queue ordered by suspicion score. Tie-breaking: shallower depth first (shallower violations are generally easier to reproduce and explain). This means:
-
-- Paths with high suspicion at depth 2 are explored before medium-suspicion paths at depth 1.
-- Among equally suspicious states, shallower ones are expanded first.
-- The search is depth-biased toward promising directions.
+Priority queue by suspicion. Tie-breaking: shallower depth first.
 
 ---
 
 ## State Deduplication
 
-Two different search paths may converge to the same state. The deduplication key uses a canonical state hash:
-
 ```
-hash(
-    target.contract_address,
-    canonical_form(final_state.storage_values),  # sorted, minimized
-    tuple(sequence.call_signatures),
-    chain,
-)
+canonical_hash(witness: WitnessState) -> bytes:
+    return hash(
+        witness.chain,
+        canonical_form(witness.snapshot.chain_snapshots),
+        tuple(witness.call_sequence),
+        witness.correlation_value,
+    )
 ```
-
-The `chain` field prevents identical states on different chains from being treated as duplicates. The `canonical_form` normalizes storage values to prevent semantically identical but structurally different states from evading dedup.
 
 ---
 
@@ -355,17 +342,13 @@ def adaptive_width(depth):
     return widths.get(depth, 1)
 ```
 
-Shallow depths explore broadly; as constraints accumulate, the beam narrows toward the most suspicious paths.
-
 ---
 
 ## Reachability + Execution Combined
 
-Rather than running `verify_reachability` then `execute_sequence` as two separate steps, the harness runs the sequence once and interprets the result:
+The harness runs the sequence once and interprets the result:
 
-- **Success + no revert** → reachable, execution complete, check invariant against `after_state`.
-- **Revert with known reason** → reachable (the call executed but hit a condition). The revert reason becomes an additional constraint.
-- **Revert with unknown reason** → unreachable under current constraints. Discard this branch.
-- **Out-of-gas / timeout** → ambiguous. Retry once with higher gas limit; if still fails, treat as unreachable.
-
-This halves the number of tool invocations per candidate.
+- **Success + no revert** → reachable, record witness, check invariant.
+- **Revert with known reason** → reachable. Revert reason becomes additional constraint.
+- **Revert with unknown reason** → unreachable under current constraints. Discard.
+- **Out-of-gas / timeout** → **inconclusive** (not unreachable). Record witness with `status="inconclusive"`. The search continues but this branch cannot confirm or refute the invariant.

@@ -75,15 +75,17 @@ The core idea: a cross-chain invariant is broken into per-chain sub-probes, each
 
 ### Invariant Loader
 
-Parses `.t.sol` test files and extracts cross-chain invariant function signatures. Identifies NatSpec tags (`@crosschain`, `@observation`, `@correlation`, `@assume`) and produces a normalized `CrossChainInvariant` struct. The IR carries the full invariant specification: contexts per chain, observation policy, correlation key, assumptions, and the property predicate.
+Parses `.t.sol` test files and extracts cross-chain invariant function signatures. Identifies NatSpec tags (`@crosschain`, `@transition`, `@observation`, `@correlation`, `@bind`, `@quantify`, `@assume`) and produces a normalized `CrossChainInvariant` struct. The IR carries the full invariant specification: contexts per chain, observation policy, correlation key, assumptions, and the property predicate.
 
 ### Cross-Chain Decomposer
 
-Breaks a cross-chain invariant into per-chain sub-invariants using the correlation key and observation policy from the IR. The decomposer does **not** invent semantics — it uses the metadata the developer provided. For a balance invariant with `@correlation messageHash` and `@observation AFTER_ALL_DELIVERED`:
+Breaks a cross-chain invariant into per-chain sub-invariants using the IR metadata. The decomposer reads `TransitionPredicate` declarations to know which state variables change through which functions, `CorrelationExtractor` to pair source/destination events, `Binding` to map variables across chains, and `QuantifiedPredicate` to express the property. It does **not** invent deposit/burn/refund rules — those come from `@transition` tags in the invariant file.
 
-- **Sub-invariant for source chain:** `locked_src` only changes through valid deposit, verified burn, or expired-message refund events.
-- **Sub-invariant for destination chain:** `minted_dst` only changes through verified lock events with unique `messageHash`.
-- **Cross-check:** after all eligible messages are delivered, `locked_src(event) == minted_dst(event)` for every correlated pair.
+For each chain, the decomposer generates assertions:
+- State variable `V` only changes through the functions listed in its `TransitionPredicate`.
+- If a probe finds a path where `V` changes through an undeclared function, that is a violation of the local sub-invariant.
+
+The cross-chain check uses `CorrelationExtractor` to pair events and evaluates the `QuantifiedPredicate` against the bound variables.
 
 The decomposer validates that the invariant IR is complete — missing correlation key or observation policy is a hard error, not a silent default.
 
@@ -133,7 +135,7 @@ Renders findings with per-chain trace annotations. Each call in a cross-chain at
 
 **Message lifecycle is an explicit model.** Delay, ordering, duplicate delivery, replay, finality depth, reorg assumptions, and guardian-set epochs are all modeled as constraints. The harness checks against this model to distinguish bugs from valid transient states.
 
-**Per-chain schedulers are causally coordinated, not fully independent.** Static analysis and initial probing run independently. Once cross-chain messages are emitted, the coordinator serializes the causal dependency. Unrelated probes remain parallelizable.
+**Per-chain schedulers are causally coordinated through the message lifecycle.** Static analysis and initial probing run independently. Once cross-chain messages are emitted, the coordinator serializes the causal dependency. Unrelated probes remain parallelizable.
 
 **Adapters expose capabilities, not just a uniform interface.** The adapter protocol includes a `ToolCapabilities` declaration so the scheduler knows which tool can handle which probe type. Slither cannot execute; Echidna cannot symbolically prove. The scheduler routes accordingly.
 
