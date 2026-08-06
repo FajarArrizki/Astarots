@@ -25,5 +25,5 @@ Initial setup documentation — not part of the shipped design docs:
 
 | Document | Description |
 |---|---|
-| [Project Structure](.initial/Project%20stukture/README.md) | Modular per-function directory layout for `devil/`, `tests/`, and `doch/` |
+| [Project Structure](.initial/Project stukture/README.md) | Modular per-function directory layout for `devil/`, `tests/`, and `doch/` |
 | [Dependencies](.initial/Depedensi/README.md) | Runtime, tooling, and application dependency table with versions and links |

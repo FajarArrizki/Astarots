@@ -105,7 +105,9 @@ Echidna is a fuzzer. Best suited for concrete sequence exploration and boundary 
 
 **Execute mode:** Replay a specific call sequence through Echidna's concrete execution engine. Forward cross-chain events to the mock relayer for the other chain's adapter.
 
-**Confirm mode:** Re-run fuzzing with the witness sequence as seed, varying parameters. The goal is to **reproduce the violation**, not to check that the invariant holds. If the fuzzer finds the invariant still broken across parameter variations, return `Counterexample` — the witness is independently confirmed. If the fuzzer cannot reproduce the violation within the budget, return `UnsatUnderBounds` (the witness may be a fluke or need tighter constraints).
+**Confirm mode:** Echidna cannot independently confirm its own findings — re-running the same fuzzer with different parameters is not an independent method. Confirmation of an Echidna-discovered counterexample must come from a **different** tool (typically Halmos, which can symbolically verify the same path). Echidna's confirm mode is limited to **replay verification**: re-executing the exact witness sequence to ensure determinism. For independent confirmation, the scheduler routes the witness to Halmos via its `confirm()` method.
+
+*This is an explicit instance of the adapter protocol rule: confirmation must use a different analysis method than the original probe.*
 
 ### Halmos Adapter
 

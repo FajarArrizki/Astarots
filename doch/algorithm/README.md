@@ -296,7 +296,11 @@ The algorithm uses **per-state adaptive beam search**: at each depth, the top N 
 | 2 → 3 | 2 | Focus on best constraint sets |
 | 3 → 4 | 1 | Commit to deepest exploration |
 
+**Depth note:** Depth 4 is a reasonable default for most bridge invariants (quorum boundary, replay, guardian consistency), but complex protocols with long dependency chains may need deeper search. Realistic cross-chain attack sequences (governance proposal → timelock → execution → relay → destination action) can span 6+ steps per chain. Use `--max-depth` to increase this for protocols with deep governance or multi-stage message pipelines.
+
 A hard cap on total states (`budget`, default 200) across all chains prevents unbounded growth.
+
+**Budget semantics:** One "state" in the beam search is one node expansion (one probe + execute cycle per candidate). This is distinct from tool-internal test limits — `echidna.test_limit = 50000` means Echidna runs up to 50,000 call sequences per *single* probe invocation, not per beam-search state. The total compute cost is `state_budget × tool_test_limit`, which can be substantial. Budget, tool limits, and timeouts should be tuned together based on the complexity of the target protocol.
 
 ---
 
@@ -310,6 +314,8 @@ suspicion(candidate) =
     0.15 × dependency_depth_score +
     0.10 × tool_confidence_score +
     0.05 × prior_violation_proximity
+
+**Methodology note:** These weights are initial placeholders, not calibrated constants. Each sub-score is normalized to `[0.0, 1.0]` by its adapter, but the weighting scheme itself has not been validated against real audit data. The weights encode a hypothesis — storage/access modifications are the strongest signal, cross-chain interaction is next, tool confidence is supplementary. This hypothesis must be tested and recalibrated once the harness is operational against known vulnerable contracts. Until then, treat the ranking as a signal to guide exploration, not a precision measurement.
 ```
 
 ---
@@ -317,6 +323,8 @@ suspicion(candidate) =
 ## Frontier Ordering
 
 Priority queue by suspicion. Tie-breaking: shallower depth first.
+
+**Fairness concern:** The unified frontier orders states globally by suspicion score, regardless of chain. If one chain's states systematically score higher (e.g., the destination chain where more storage variables are modified per step), the search may starve the other chain. No per-chain allocation or round-robin policy is enforced at this stage. This is a known design trade-off: the unified frontier prioritizes the most suspicious paths overall, sacrificing chain-level fairness for search efficiency. If starvation becomes observable in practice, a per-chain quota or alternating schedule can be introduced without changing the frontier data structure.
 
 ---
 

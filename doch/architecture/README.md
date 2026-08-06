@@ -75,7 +75,13 @@ The core idea: a cross-chain invariant is broken into per-chain sub-probes, each
 
 ### Invariant Loader
 
-Parses `.t.sol` test files and extracts cross-chain invariant function signatures. Identifies NatSpec tags (`@crosschain`, `@transition`, `@observation`, `@correlation`, `@bind`, `@quantify`, `@assume`) and produces a normalized `CrossChainInvariant` struct. The IR carries the full invariant specification: contexts per chain, observation policy, correlation key, assumptions, and the property predicate.
+Parses `.t.sol` test files and extracts cross-chain invariant function signatures from NatSpec tags. Produces a normalized `CrossChainInvariant` struct. The loader validates that the NatSpec `@quantify` predicate matches the Solidity `assert()` expression — if the two representations diverge, the loader emits a hard error. This prevents the authoritative IR from drifting from the human-readable Solidity rendering.
+
+### Predicate Expression Engine
+
+Evaluates `QuantifiedPredicate.predicate` strings at runtime. The predicate is a mini expression language over bound variables and chain snapshots. It supports equality (`==`, `!=`), inequality (`<`, `>`, `<=`, `>=`), and logical operators (`&&`, `||`, `!`) over integer variables and array lookups. The engine resolves variable references through the invariant's `Binding` declarations and extracts values from `GlobalState.chain_snapshots`.
+
+This component is necessary because `predicate: str` like `"locked == minted"` must be parsed and evaluated against actual chain state during the search. The expression engine is a bounded evaluator — it does not support arbitrary Solidity expressions, only the subset needed for cross-chain predicate checking. It is implemented as a standalone component, not embedded in the invariant loader or scheduler.
 
 ### Cross-Chain Decomposer
 

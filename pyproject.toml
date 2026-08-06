@@ -1,7 +1,28 @@
 [project]
 name = "astarots"
 version = "0.1.0"
-description = "Add your description here"
+description = "Cross-chain invariant testing harness — unified beam search over Echidna, Halmos, and Slither"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.12",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
