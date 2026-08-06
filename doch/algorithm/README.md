@@ -1,6 +1,6 @@
 # Algorithm — Cross-Chain Deepest Edge Discovery
 
-The core algorithm searches for the deepest edge case that violates a cross-chain invariant. "Deepest" means the violation requiring the most specific accumulated constraints across multiple chains — the one that would be invisible to any single-chain analysis.
+The core algorithm searches for the deepest edge case that violates a cross-chain invariant — starting from **forked mainnet state** at pinned blocks, not from an empty deployment. "Deepest" means the violation requiring the most specific combination of existing mainnet state + probe-generated call sequences — the edge case that emerges from 5 years of accumulated protocol state interacting with a specific transaction pattern.
 
 The algorithm uses a **unified frontier** across all chains. Each search state is an immutable, branch-local snapshot of both chains. The frontier expands states in causal order: source-chain steps that emit messages precede destination-chain steps that consume them. There is no separate per-chain search followed by Cartesian recombination — that approach can combine states from causally impossible branches.
 
@@ -20,8 +20,9 @@ GlobalState:
 
 Snapshot:
     chain_id: ChainId
-    contract_states: Map[ContractId, Storage] # storage per contract
-    block_number: int
+    fork_block: int                          # pinned mainnet block this state was forked from
+    contract_states: Map[ContractId, Storage] # storage per contract (real mainnet values)
+    block_number: int                        # current block after probe steps
     timestamp: int
 ```
 
@@ -34,11 +35,13 @@ When a branch expands, it copies the global state (structural sharing where poss
 The frontier is a single priority queue holding `SearchState` nodes. Each node belongs to exactly one chain context (the chain where the next action executes), but the global state spans all chains. The frontier naturally respects causal order: source-chain states that emit messages are expanded before the destination-chain states that consume them, because the message coordinator enforces `Delivered` status before destination execution.
 
 ```
-unified_search(targets, invariant, max_depth=4, budget=200):
+unified_search(targets, invariant, fork_blocks, max_depth=4, budget=200):
+    # targets = {chain_id: contract_address}  — mainnet addresses
+    # fork_blocks = {chain_id: block_number} — pinned mainnet blocks
     frontier = PriorityQueue()
     # Priority: higher suspicion first. Tie-breaking: shallower depth.
     initial = SearchState(
-        global_state=GlobalState.initial(targets),
+        global_state=GlobalState.from_forks(targets, fork_blocks),
         chain_context="ethereum",    # start on source chain
         depth=0,
     )
@@ -66,6 +69,11 @@ unified_search(targets, invariant, max_depth=4, budget=200):
         )
 
         ranked = rank_by_suspicion(candidates)
+
+        # Note: at depth 0, extract_constraints reads EXISTING state values
+        # from the forked mainnet snapshot — real guardian sets, real pending
+        # messages, real token balances accumulated over years of operation.
+        # These become the seed constraints that guide subsequent probing.
 
         for cand in ranked[:beam_width]:
             extracted = extract_constraints(cand)

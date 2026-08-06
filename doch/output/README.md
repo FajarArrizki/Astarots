@@ -53,6 +53,7 @@ Every output artifact includes a metadata block sufficient for independent repro
 ```json
 {
   "schema_version": "1.0.0",
+  "mode": "mainnet-fork",  # invariants checked against forked state, not fresh deploy
   "run_id": "run_2026-08-06_a3f2c1",
   "finding_id": "bridge-edge-0012",
   "project": {
@@ -117,6 +118,7 @@ astarots probe --target src/BridgeEth.sol,src/BridgePoly.sol --chains eth,poly -
 ```json
 {
   "schema_version": "1.0.0",
+  "mode": "mainnet-fork",  # invariants checked against forked state, not fresh deploy
   "run_id": "run_2026-08-06_a3f2c1",
   "metadata": { "...": "..." },
   "invariants": [

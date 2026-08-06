@@ -9,9 +9,10 @@ Astarots is invoked from the command line. Cross-chain invariant testing require
 Given a Foundry project with bridge contracts on Ethereum and Polygon, and invariants at `test/invariants/BridgeInvariants.t.sol`:
 
 ```bash
-# Step 1: Register chains (secrets via env vars, never inlined)
-astarots chain add ethereum --rpc "$ETH_RPC_URL" --chain-id 1
-astarots chain add polygon  --rpc "$POLY_RPC_URL" --chain-id 137
+# Step 1: Register chains with pinned fork blocks
+#         Blocks must be archive-node accessible (historical state queries)
+astarots chain add ethereum --rpc "$ETH_RPC_URL" --chain-id 1   --fork-block 18500000
+astarots chain add polygon  --rpc "$POLY_RPC_URL" --chain-id 137 --fork-block 49800000
 
 # Step 2: Run probe (explicit chain-to-contract binding)
 astarots probe \
@@ -33,7 +34,7 @@ This command compiles both contracts, decomposes cross-chain invariants into per
 Manage chain configurations. Chains must be registered before probing.
 
 ```
-astarots chain add <alias> --rpc <URL> [--chain-id <ID>]
+astarots chain add <alias> --rpc <URL> --chain-id <ID> --fork-block <BLOCK>
 astarots chain rm  <alias>
 astarots chain list
 ```
@@ -48,7 +49,7 @@ astarots chain add arbitrum  --rpc $ARB_RPC_URL  --chain-id 42161
 
 ### `probe`
 
-Run guided search against cross-chain invariants.
+Run guided search against cross-chain invariants — starting from forked mainnet state at the pinned blocks configured per chain. Contracts are NOT deployed fresh; the harness forks mainnet and probes from the accumulated state.
 
 ```
 astarots probe [OPTIONS]
@@ -221,10 +222,12 @@ polygon = "src/BridgePoly.sol"
 [chains.ethereum]
 rpc_url = "$ETH_RPC_URL"
 chain_id = 1
+fork_block = 18500000
 
 [chains.polygon]
 rpc_url = "$POLY_RPC_URL"
 chain_id = 137
+fork_block = 49800000
 
 [tools.echidna]
 timeout = 300

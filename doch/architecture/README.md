@@ -2,7 +2,7 @@
 
 Astarots is a **cross-chain invariant testing harness**. It takes invariants that span multiple chains — bridge balance equality, message replay protection, guardian quorum thresholds — and discovers edge cases through guided search across multiple analysis tools.
 
-The core idea: a cross-chain invariant is broken into per-chain sub-probes, each analyzed by the best tool for that chain's context. A cross-chain message coordinator manages the causal dependency between chains — messages emitted on the source must be delivered to the destination before the destination's state can be checked. The harness then recombines per-chain findings to verify the full cross-chain property.
+The core idea: invariants are checked against **forked mainnet state** at pinned blocks, not against freshly deployed contracts. The Wormhole protocol has operated for 5+ years — its code is battle-tested, but the accumulated state (millions of transactions, dozens of guardian rotations, thousands of cross-chain messages in various states) may harbor edge cases invisible to code-level analysis. The harness forks mainnet at a specific block per chain, probes from that state, and discovers attack vectors that emerge from specific state + specific transaction sequences.
 
 ---
 
@@ -22,7 +22,8 @@ The core idea: a cross-chain invariant is broken into per-chain sub-probes, each
 │                                                                    │
 │  ┌───────────────┐   ┌──────────────────┐   ┌──────────────────┐  │
 │  │   Invariant   │──▶│  Cross-Chain     │──▶│  Chain Registry  │  │
-│  │   Loader      │   │  Decomposer      │   │  (eth, poly, ...)│  │
+│  │   Loader      │   │  Decomposer      │   │  (eth@18.5M,      │  │
+│  │               │   │                  │   │   poly@49.8M, ...)│  │
 │  └───────────────┘   └────────┬─────────┘   └──────────────────┘  │
 │                               │                                    │
 │                               ▼                                    │
@@ -97,7 +98,7 @@ The decomposer validates that the invariant IR is complete — missing correlati
 
 ### Chain Registry
 
-Manages per-chain configuration: RPC endpoints, contract deployments, and chain-specific tool settings. Each chain is registered with a unique alias used throughout the harness.
+Manages per-chain configuration: RPC endpoints, **pinned fork block numbers**, mainnet contract addresses, and chain-specific tool settings. Each chain is registered with a unique alias and a fork block — the harness never deploys fresh contracts. It forks mainnet at the specified block and operates on the live state accumulated over years of protocol operation. Fork blocks must be archive-node accessible (historical state queries required).
 
 ### Cross-Chain Message Coordinator
 
@@ -113,7 +114,7 @@ Static analysis (Slither) and initial local probing (Echidna corpus generation) 
 
 ### Per-Chain Scheduler
 
-One scheduler instance per chain. Each runs beam search on its assigned sub-invariant using the shared search engine. Schedulers operate concurrently for independent work (static analysis, initial probing) and serialize through the coordinator when causal dependencies exist. Per-chain schedulers produce `SearchResult` structs containing both candidates and local findings — not just violations.
+One scheduler instance per chain. Each runs beam search on its assigned sub-invariant starting from the **forked mainnet state** at the configured block. The scheduler does not deploy contracts — it connects to the fork and probes from the existing state. Schedulers operate concurrently for independent work (static analysis, initial probing) and serialize through the coordinator when causal dependencies exist. Per-chain schedulers produce `SearchResult` structs containing both candidates and local findings — not just violations.
 
 ### Search Engine
 
@@ -145,4 +146,6 @@ Renders findings with per-chain trace annotations. Each call in a cross-chain at
 
 **Adapters expose capabilities, not just a uniform interface.** The adapter protocol includes a `ToolCapabilities` declaration so the scheduler knows which tool can handle which probe type. Slither cannot execute; Echidna cannot symbolically prove. The scheduler routes accordingly.
 
-**The harness uses deterministic twin-state for replay, not vm.mockCall.** Cross-chain replay uses separate EVM state databases or Foundry multi-fork with pinned blocks, not string-based mock calls. This ensures replay is a faithful reproduction of the multi-chain execution.
+**The harness operates on forked mainnet state, not fresh deploys.** All execution starts from a pinned mainnet block. The contracts are already deployed at known addresses with years of accumulated state. Constraint extraction reads real storage values, real guardian sets, real pending message queues. The search starts from the actual state of the protocol — not from an empty deployment. Fresh deploys are only used for unit-testing the harness itself, never for production probe runs.
+
+**The harness uses deterministic twin-state for replay, not vm.mockCall.** Cross-chain replay uses separate EVM state databases or Foundry multi-fork with pinned blocks, not string-based mock calls. Since the starting state is already a fork, replay is a fork-of-a-fork — fully deterministic and reproducible.

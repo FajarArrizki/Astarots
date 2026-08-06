@@ -1,6 +1,6 @@
 # Astarots — Design Documentation
 
-Cross-chain invariant testing harness. Combines Echidna, Halmos, Slither, and other analysis tools under a unified beam search to discover deep edge cases in cross-chain protocols — bridges, message relays, and multi-chain applications — that no single tool can find alone.
+Cross-chain invariant testing harness — **mainnet fork state archaeology**. Combines Echidna, Halmos, Slither, and other analysis tools under a unified causal beam search. Invariants are checked against forked mainnet state at pinned blocks — the contracts are already deployed, the state has accumulated over years of protocol operation. Edge cases emerge from specific state + specific transaction sequences, not from code-level bugs.
 
 **Milestone 1: Cross-chain.** The harness decomposes multi-chain invariants into per-chain sub-probes with developer-declared transition predicates, runs causal beam search across a unified frontier — source-chain steps precede destination-chain steps through an explicit message lifecycle, no Cartesian recombination — and correlates witnesses by correlation value to verify the cross-chain property. Future milestones will extend this to single-chain protocol domains (DEX, lending, staking).
 

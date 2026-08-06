@@ -1,6 +1,6 @@
 # Cross-Chain Invariant Specification
 
-Invariants are properties that must hold across a protocol spanning multiple chains. They are the "fence posts" that the harness probes against. A cross-chain invariant differs from a single-chain invariant in one critical way: the protocol has in-flight state — messages emitted but not yet delivered — where naive equality assertions are invalid.
+Invariants are properties that must hold across a protocol spanning multiple chains, checked against **forked mainnet state** at pinned blocks. The Wormhole protocol has operated for 5+ years — its code is battle-tested, but the accumulated state may harbor edge cases. A cross-chain invariant differs from a single-chain invariant in one critical way: the protocol has in-flight state — messages emitted but not yet delivered across years of activity — where naive equality assertions are invalid. The invariant is evaluated against real mainnet storage, real guardian sets, and real pending message queues.
 
 The harness accepts invariants defined in `.t.sol` using standard Foundry test conventions. A `.t.sol` file declares *what* must hold; the harness' invariant IR (defined below) carries the *when, how, and under what assumptions* the property is checked. The IR is the authoritative representation — the `.t.sol` parser populates it, but a developer may also write the IR directly for properties that cannot be expressed in Solidity assertions alone.
 
