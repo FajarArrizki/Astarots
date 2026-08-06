@@ -10,19 +10,20 @@ Given a Foundry project with bridge contracts on Ethereum and Polygon, and invar
 
 ```bash
 # Step 1: Register chains
-astarots chain add ethereum --rpc $ETH_RPC_URL
-astarots chain add polygon  --rpc $POLY_RPC_URL
+astarots chain add ethereum --rpc $ETH_RPC_URL --chain-id 1
+astarots chain add polygon  --rpc $POLY_RPC_URL --chain-id 137
 
-# Step 2: Run probe
+# Step 2: Run probe (explicit chain-to-contract binding)
 astarots probe \
-    --target src/BridgeEth.sol,src/BridgePoly.sol \
-    --invariants test/invariants/ \
+    --target ethereum=src/BridgeEth.sol \
+    --target polygon=src/BridgePoly.sol \
     --chains ethereum,polygon \
+    --invariants test/invariants/ \
     --tools echidna,halmos,slither \
     --max-depth 4
 ```
 
-This command compiles both contracts, decomposes cross-chain invariants into per-chain sub-invariants, runs adaptive beam search on each chain independently, recombines findings, and prints per-chain traces with cross-chain correlation.
+This command compiles both contracts, decomposes cross-chain invariants into per-chain sub-invariants, runs adaptive beam search with causal coordination across chains, recombines findings, and prints per-chain traces with cross-chain correlation.
 
 ---
 
@@ -48,48 +49,57 @@ astarots chain add arbitrum  --rpc $ARB_RPC_URL  --chain-id 42161
 
 ### `probe`
 
-Run guided search against cross-chain invariants. Requires at least two chains via `--chains`.
+Run guided search against cross-chain invariants.
 
 ```
 astarots probe [OPTIONS]
 
 Options:
-  --target PATH,...        Comma-separated Solidity files per chain (order matches --chains)
-  --invariants PATH        Directory containing .t.sol invariant files
-  --chains LIST            Comma-separated chain aliases, e.g. "ethereum,polygon"
-  --tools LIST             Comma-separated tool names (default: echidna,halmos,slither)
-  --max-depth N            Maximum search depth per chain (default: 4)
-  --beam LIST              Beam widths per depth, e.g. "4,3,2,1" (default: adaptive)
-  --max-states N           Hard cap on total explored states per chain (default: 200)
-  --timeout N              Per-invariant timeout in seconds (default: 600)
-  --output FORMAT          Output format: console, json, html (default: console)
-  --focus FUNCTION         Only probe a specific invariant function
-  --dry-run                Validate configuration without running tools
+  --target CHAIN=CONTRACT    Explicit chain-to-contract binding, repeatable
+                              e.g. --target ethereum=src/BridgeEth.sol
+  --invariants PATH          Directory containing .t.sol invariant files
+  --chains LIST              Comma-separated chain aliases, e.g. "ethereum,polygon"
+  --tools LIST               Comma-separated tool names (default: echidna,halmos,slither)
+  --max-depth N              Maximum search depth per chain (default: 4)
+  --beam LIST                Beam widths per depth, e.g. "4,3,2,1" (default: adaptive)
+  --max-states N             Hard cap on total explored states per chain (default: 200)
+  --timeout N                Per-invariant timeout in seconds (default: 600)
+  --output FORMAT            Output format: console, json (default: console)
+  --focus FUNCTION           Only probe a specific invariant function
+  --dry-run                  Validate configuration without running tools
 ```
 
-Single-chain probing (for development or single-contract invariants) is supported by omitting `--chains` and providing a single `--target`:
+### Target Binding
+
+Target contracts are bound to chains explicitly using `chain=contract` syntax, not positionally:
 
 ```bash
-astarots probe --target src/Vault.sol --invariants test/invariants/
+astarots probe \
+    --target ethereum=src/BridgeEth.sol \
+    --target polygon=src/BridgePoly.sol \
+    --chains ethereum,polygon \
+    --invariants test/invariants/
 ```
+
+Positional matching (order of `--target` matching order of `--chains`) is deprecated and emits a warning.
 
 ### `replay`
 
-Re-execute a previously found cross-chain edge case. Replays the full multi-chain sequence through the mock relayer.
+Re-execute a previously found cross-chain edge case. Uses deterministic twin-state replay (multi-fork or twin database).
 
 ```
 astarots replay [OPTIONS]
 
 Options:
-  --edge-case PATH          Path to a saved EdgeCase JSON file
-  --target PATH,...         Contracts to replay against (may differ from original)
-  --chains LIST             Chain aliases for replay
-  --output PATH             Where to write the replay trace
+  --edge-case PATH           Path to a saved EdgeCase JSON file
+  --target CHAIN=CONTRACT    Contracts to replay against (repeatable)
+  --chains LIST              Chain aliases for replay
+  --output PATH              Where to write the replay trace
 ```
 
 ### `list-tools`
 
-Show which tools are available and their versions.
+Show which tools are available, their versions, and capabilities:
 
 ```
 astarots list-tools
@@ -98,20 +108,57 @@ astarots list-tools
 Output:
 
 ```
-  echidna    2.1.0    /usr/local/bin/echidna
-  halmos     0.2.2    /usr/local/bin/halmos
-  slither    0.11.0   /usr/local/bin/slither
+  echidna    2.1.0    fuzz,replay    /usr/local/bin/echidna
+  halmos     0.2.2    sym,confirm    /usr/local/bin/halmos
+  slither    0.11.0   static,hint    /usr/local/bin/slither
 ```
 
 ### `init`
 
-Scaffold a cross-chain invariant test file. Requires chain configuration to determine which contracts to reference.
+Scaffold a cross-chain invariant test file.
 
 ```
-astarots init --target src/BridgeEth.sol,src/BridgePoly.sol --chains ethereum,polygon
+astarots init --target ethereum=src/BridgeEth.sol --target polygon=src/BridgePoly.sol
 ```
 
-Creates `test/invariants/BridgeInvariants.t.sol` with skeleton cross-chain invariant functions derived from the contracts' public APIs. The developer fills in assertion bodies.
+Creates `test/invariants/BridgeInvariants.t.sol` with skeleton cross-chain invariant functions. The developer fills in assertion bodies.
+
+---
+
+## Precedence
+
+Configuration is resolved in this order, with later sources overriding earlier ones:
+
+1. Built-in defaults
+2. `astarots.toml` project configuration
+3. `@` NatSpec tags in `.t.sol` invariant files
+4. Environment variables (`$VAR` references in config values)
+5. CLI flags (highest precedence)
+
+---
+
+## Exit Codes
+
+| Code | Meaning |
+|---|---|
+| 0 | No violations found (verdict: not-observed for all invariants) |
+| 1 | Violation found (verdict: violated for at least one invariant) |
+| 2 | Inconclusive (timeout, tool error, or incomplete search) |
+| 3 | Invalid configuration (missing chains, invalid invariant IR, etc.) |
+| 4 | Tool execution error (all probes failed) |
+
+---
+
+## RPC Secret Protection
+
+RPC URLs containing secrets (API keys, tokens) are referenced via environment variables:
+
+```toml
+[chains.ethereum]
+rpc_url = "$ETH_RPC_URL"  # resolved from environment at runtime
+```
+
+Direct embedding of secrets in config files or CLI flags is discouraged. The harness never logs RPC URLs.
 
 ---
 
@@ -119,10 +166,12 @@ Creates `test/invariants/BridgeInvariants.t.sol` with skeleton cross-chain invar
 
 ### Writing Invariants
 
-Cross-chain invariants are standard Foundry test functions annotated with `@crosschain`:
+Cross-chain invariants are standard Foundry test functions annotated with NatSpec tags:
 
 ```solidity
 /// @crosschain src=ethereum dst=polygon
+/// @observation AFTER_ALL_DELIVERED
+/// @correlation messageHash
 /// @tools echidna, halmos
 /// @severity CRITICAL
 function invariant_locked_equals_minted() public {
@@ -130,18 +179,12 @@ function invariant_locked_equals_minted() public {
 }
 ```
 
-The harness decomposes this into per-chain sub-invariants:
-- **ethereum sub-invariant:** `locked` state is valid (only changes on verified lock/burn events).
-- **polygon sub-invariant:** `minted` state is valid (only changes on verified mint/withdraw events).
-- **Cross-check (Python):** `locked(eth_event) == minted(poly_event)` for every correlated message pair.
-
 ### Running a Subset of Invariants
-
-To focus on one invariant during development:
 
 ```bash
 astarots probe \
-    --target src/BridgeEth.sol,src/BridgePoly.sol \
+    --target ethereum=src/BridgeEth.sol \
+    --target polygon=src/BridgePoly.sol \
     --chains ethereum,polygon \
     --focus invariant_locked_equals_minted
 ```
@@ -152,7 +195,8 @@ Slither first (fast, static), findings seed Echidna (slower, dynamic):
 
 ```bash
 astarots probe \
-    --target src/BridgeEth.sol,src/BridgePoly.sol \
+    --target ethereum=src/BridgeEth.sol \
+    --target polygon=src/BridgePoly.sol \
     --chains ethereum,polygon \
     --tools slither,echidna
 ```
@@ -165,7 +209,6 @@ For repeated runs, create `astarots.toml`:
 
 ```toml
 [default]
-target = ["src/BridgeEth.sol", "src/BridgePoly.sol"]
 invariants = "test/invariants/"
 chains = ["ethereum", "polygon"]
 tools = ["echidna", "halmos", "slither"]
@@ -173,6 +216,10 @@ max_depth = 4
 beam_widths = [4, 3, 2, 1]
 max_states = 200
 timeout = 600
+
+[targets]
+ethereum = "src/BridgeEth.sol"
+polygon = "src/BridgePoly.sol"
 
 [chains.ethereum]
 rpc_url = "$ETH_RPC_URL"
@@ -198,22 +245,23 @@ detectors = ["reentrancy", "unchecked-transfer", "access-control"]
 
 ## Output Interpretation
 
-Cross-chain probe output shows per-chain findings with correlation:
+Cross-chain probe output shows per-chain findings with verdict and evidence strength:
 
 ```
 Cross-Chain Invariant: invariant_locked_equals_minted
 ═══════════════════════════════════════════════════
-Status:   FAIL — PROVEN
-Depth:    3 (ethereum) + 2 (polygon) → cross-chain confirmed
-Impact:   CRITICAL — unauthorized mint on destination
+Verdict:   violated
+Evidence:  symbolically-confirmed (echidna + halmos, bounds: L=5,T=120)
+Depth:     3 (ethereum) + 2 (polygon) → cross-chain confirmed
+Impact:    CRITICAL — unauthorized mint on destination
 
 Source Chain (ethereum):
   [setDelegate(attacker), lock(100 ETH), rotateGuardians()]
-  └─ Found by: echidna → halmos (proven)
+  └─ Found by: echidna → halmos (symbolically-confirmed)
 
 Destination Chain (polygon):
   [mint(100 ETH), withdraw(100 ETH)]
-  └─ Found by: echidna
+  └─ Found by: echidna (observed)
 
 Cross-Chain Correlation:
   └─ Guardian rotation on ethereum skipped verification on polygon
@@ -234,8 +282,8 @@ Per-chain traces are labeled with `[chain]` annotations. The cross-chain correla
 ## Development Loop
 
 1. **Define chains** — `astarots chain add` for each chain in the protocol.
-2. **Define invariants** — write `.t.sol` files with `@crosschain` annotations.
-3. **Quick scan** — `astarots probe --tools slither` for fast static cross-chain pattern detection.
-4. **Shallow fuzz** — `astarots probe --tools echidna --max-depth 2` per chain.
+2. **Define invariants** — write `.t.sol` files with `@crosschain` annotations and observation policy.
+3. **Quick static scan** — `astarots probe --tools slither` for fast cross-chain pattern detection.
+4. **Shallow fuzz** — `astarots probe --tools echidna --max-depth 2` for dynamic exploration.
 5. **Deep search** — `astarots probe --tools echidna,halmos --max-depth 4` for thorough edge case discovery.
-6. **Replay and fix** — `astarots replay` across both chains to verify fixes.
+6. **Replay and fix** — `astarots replay` to verify findings; run `FixedRegression` to confirm the patch.

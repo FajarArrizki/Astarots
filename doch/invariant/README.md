@@ -1,14 +1,75 @@
 # Cross-Chain Invariant Specification
 
-Invariants are properties that must hold across all reachable states of a protocol spanning multiple chains. They are the "fence posts" that the harness probes against — when a cross-chain invariant breaks, an edge case has been found that no single-chain tool could detect.
+Invariants are properties that must hold across a protocol spanning multiple chains. They are the "fence posts" that the harness probes against. A cross-chain invariant differs from a single-chain invariant in one critical way: the protocol has in-flight state — messages emitted but not yet delivered — where naive equality assertions are invalid.
 
-Invariants are defined in `.t.sol` files using standard Foundry test conventions with NatSpec annotations for cross-chain metadata. The harness reads these files, decomposes cross-chain invariants into per-chain sub-invariants, and translates them into tool-specific formats.
+The harness accepts invariants defined in `.t.sol` using standard Foundry test conventions. A `.t.sol` file declares *what* must hold; the harness' invariant IR (defined below) carries the *when, how, and under what assumptions* the property is checked. The IR is the authoritative representation — the `.t.sol` parser populates it, but a developer may also write the IR directly for properties that cannot be expressed in Solidity assertions alone.
+
+---
+
+## Invariant IR (Internal Representation)
+
+Every invariant, whether parsed from `.t.sol` or authored directly, is normalized into this structure before the scheduler sees it:
+
+```
+CrossChainInvariant:
+    id: str                          # stable identifier
+    contexts: Map[ChainId, Context]  # one context per participating chain
+    correlation_key: str             # how to pair events across chains
+    observation_policy: ObservationPolicy
+    assumptions: list[Assumption]
+    property: SafetyPredicate | EventuallyPredicate
+```
+
+### Context
+
+```
+Context:
+    chain_id: str                    # "ethereum", "polygon"
+    contract: str                    # contract name or address
+    monitors: list[str]              # state variables or events to observe
+```
+
+### ObservationPolicy
+
+Determines **when** the invariant is checked. A property that is only true after all in-flight messages are delivered must not be checked mid-flight.
+
+```
+ObservationPolicy:
+    kind: PER_TRANSACTION | AFTER_FINALITY | AFTER_ALL_DELIVERED | BLOCK_BOUNDED
+    deadline: Optional[int]          # blocks or seconds, for BLOCK_BOUNDED
+    finality_blocks: Optional[int]   # confirmations required, for AFTER_FINALITY
+```
+
+### Assumption
+
+Conditions the harness assumes to hold. These are NOT checked — they define the scope. If an assumption is violated in the real world, the invariant's guarantees do not apply.
+
+```
+Assumption:
+    kind: GUARDIAN_HONESTY | MESSAGE_ORDERING | REORG_DEPTH | LIVENESS | ...
+    value: Any                       # e.g. "at_most_N_malicious: 6"
+```
+
+### Property
+
+Two kinds of cross-chain properties:
+
+```
+SafetyPredicate:                     # must always hold
+    predicate: str                   # assertion expression
+
+EventuallyPredicate:                 # must hold eventually
+    predicate: str
+    deadline: int                    # blocks or seconds
+```
+
+`safety` is for properties like "message replay count ≤ 1". `eventually` is for liveness properties like "a valid lock event is minted on the destination within N blocks".
 
 ---
 
 ## Invariant File Convention
 
-An invariant file lives under `test/invariants/` and declares the cross-chain property alongside per-chain contract setup:
+Invariant files live under `test/invariants/`. The `@crosschain` tag signals a cross-chain invariant. Additional NatSpec tags declare observation policy and assumptions:
 
 ```solidity
 // test/invariants/BridgeInvariants.t.sol
@@ -23,12 +84,15 @@ contract BridgeInvariants is Test {
     BridgePoly bridgePoly;
 
     function setUp() public {
-        // Deploy on both chains via mock relayer
         bridgeEth = new BridgeEth();
         bridgePoly = new BridgePoly();
     }
 
     /// @crosschain src=ethereum dst=polygon
+    /// @observation AFTER_ALL_DELIVERED
+    /// @assume guardian_honesty: at_most_6_malicious
+    /// @assume message_ordering: ordered_by_sequence
+    /// @correlation messageHash
     function invariant_locked_equals_minted() public {
         uint ethLocked = bridgeEth.totalLocked();
         uint polyMinted = bridgePoly.totalMinted();
@@ -37,97 +101,110 @@ contract BridgeInvariants is Test {
 }
 ```
 
-The harness identifies cross-chain invariants by the `@crosschain` NatSpec tag. Functions with the `invariant_` prefix but without `@crosschain` are treated as single-chain invariants (supported for completeness, not the primary use case).
+The `@observation AFTER_ALL_DELIVERED` tag tells the harness: do not check this invariant while messages are in flight. The invariant is only expected to hold after all emitted messages have been delivered and processed on the destination.
 
 ---
 
 ## Cross-Chain Invariant Patterns
 
-### Balance Conservation
+### Balance Conservation (Eventual)
 
-The most fundamental cross-chain invariant: what is locked on the source must equal what is minted (or unlocked) on the destination.
+The most fundamental cross-chain invariant: what is locked on the source must equal what is minted on the destination — **after all in-flight messages are delivered**.
 
 ```solidity
 /// @crosschain src=ethereum dst=polygon
-function invariant_locked_equals_minted() public {
+/// @observation AFTER_ALL_DELIVERED
+/// @correlation messageHash
+function invariant_locked_equals_minted_after_delivery() public {
     assert(bridgeEth.totalLocked() == bridgePoly.totalMinted());
 }
 ```
 
-**What can break it:** reentrant lock, double-spend via replay, message ordering manipulation, partial fills that don't reconcile.
+Without `AFTER_ALL_DELIVERED`, this assertion fails on every normal `lock()` call — the source has incremented `locked` but the destination hasn't yet received the message.
+
+**What can break it:** reentrant lock, double-spend via replay, message ordering manipulation, partial fills that don't reconcile, message expiration without refund.
 
 **Decomposition:**
-- Source: `locked` only increases on valid deposit, only decreases on verified burn.
-- Destination: `minted` only increases on verified lock event, only decreases on valid withdrawal.
-- Cross-check: every lock event on source has a corresponding mint on destination with equal amount.
+- Source (safety): `locked` only increases on valid deposit; only decreases on verified burn or expired-message refund.
+- Destination (safety): `minted` only increases on verified lock event with unique `messageHash`.
+- Cross-check (eventual): for every finalized lock event on source, there exists a corresponding mint on destination with equal amount, checked after all eligible messages are delivered.
 
-### Quorum Threshold
+### Quorum Threshold (Safety)
 
-Guardian-based bridges require M-of-N signatures to authorize messages. The threshold logic itself is a rich target for edge cases.
+Guardian-based bridges require M-of-N signatures. This is a pure safety property — it must hold at every state, regardless of in-flight messages.
 
 ```solidity
 /// @crosschain src=ethereum dst=polygon
+/// @observation PER_TRANSACTION
+/// @assume guardian_honesty: at_most_6_malicious
 function invariant_valid_quorum_required() public {
-    // No message executes without >= threshold valid signatures
-    for (uint i = 0; i < bridgeEth.pendingMessageCount(); i++) {
-        bytes32 msgHash = bridgeEth.pendingMessageAt(i);
-        uint sigCount = bridgeEth.verifiedSignatureCount(msgHash);
+    // No message is executed without >= threshold valid signatures
+    // from the CURRENT guardian set.
+    bytes32 currentSet = bridgeEth.currentGuardianSetRoot();
+    for (uint i = 0; i < bridgeEth.executedMessageCount(); i++) {
+        bytes32 msgHash = bridgeEth.executedMessageAt(i);
+        uint sigCount = bridgeEth.verifiedSignatureCount(msgHash, currentSet);
         assert(sigCount >= bridgeEth.GUARDIAN_THRESHOLD());
     }
 }
 ```
 
-**What can break it:** signature from rotated-out guardian counted, duplicate signatures from same guardian, invalid signatures accepted, threshold evaluated against wrong guardian set.
+**What can break it:** signature from rotated-out guardian counted toward quorum, duplicate signatures from same guardian, invalid signatures accepted, threshold evaluated against wrong guardian set, mixed-set quorum crossing.
 
 **Decomposition:**
-- Per-chain: signature verification logic, guardian set management, threshold comparison.
-- Cross-check: guardian set must be identical across chains during the same epoch. A signature from a guardian valid on chain A but not on chain B creates an asymmetry that may be exploitable.
+- Per-chain (safety): signature verification logic checks per-signature set membership against the active guardian set at execution time.
+- Cross-check (safety): guardian set root must be identical across chains during the same epoch.
 
-### Guardian Set Consistency
+### Message Replay Protection (Safety)
 
-When the guardian set rotates, both chains must agree on the active set. A window where chain A uses set X and chain B uses set Y creates a validation gap.
+A signed message must be consumable at most once per destination chain.
 
 ```solidity
 /// @crosschain src=ethereum dst=polygon
+/// @observation PER_TRANSACTION
+/// @correlation messageHash
+function invariant_no_message_replay() public {
+    // Every executed message has consumption count exactly 1
+    for (uint i = 0; i < bridgePoly.executedMessageCount(); i++) {
+        bytes32 msgHash = bridgePoly.executedMessageAt(i);
+        assert(bridgePoly.consumptionCount(msgHash) == 1);
+    }
+}
+```
+
+The invariant is per message identity — `consumption_count[messageHash] <= 1`. Sequence number relationships between source and destination are implementation details that may not hold during normal operation (gaps, reorgs).
+
+**What can break it:** message hash collision, consumption flag not set before external call, guardian rotation resets consumption map, same message valid on multiple chains.
+
+**Decomposition:**
+- Per-chain (safety): consumption flag set irreversibly before any external call in the execution path.
+- Cross-check (safety): no `messageHash` consumed on more than one destination chain.
+
+### Guardian Set Consistency (Safety)
+
+Both chains must agree on the active guardian set during message processing.
+
+```solidity
+/// @crosschain src=ethereum dst=polygon
+/// @observation PER_TRANSACTION
 function invariant_guardian_set_consistent() public {
-    bytes32 ethRoot = bridgeEth.guardianSetRoot();
-    bytes32 polyRoot = bridgePoly.guardianSetRoot();
+    // Guardian set root must match on both chains at the time
+    // a message is processed. In-flight rotation messages are
+    // excluded from this check until delivered.
+    bytes32 ethRoot = bridgeEth.currentGuardianSetRoot();
+    bytes32 polyRoot = bridgePoly.currentGuardianSetRoot();
     assert(ethRoot == polyRoot);
 }
 ```
 
-**What can break it:** rotation timing mismatch, one chain accepts rotation while other rejects it, partial rotation (some guardians rotated, some not).
+**What can break it:** rotation timing mismatch, one chain accepts rotation while other rejects it, partial rotation.
 
-**Decomposition:**
-- Per-chain: guardian set update logic, root commitment verification.
-- Cross-check: root equality at every block where a cross-chain message was processed.
-
-### Message Replay Protection
-
-A signed message must be executable exactly once, on exactly one destination chain.
+### Fee Preservation (Eventual)
 
 ```solidity
 /// @crosschain src=ethereum dst=polygon
-function invariant_no_message_replay() public {
-    // Sequence numbers must be monotonic and non-overlapping
-    uint srcSeq = bridgeEth.lastProcessedSequence();
-    uint dstSeq = bridgePoly.lastReceivedSequence();
-    assert(dstSeq <= srcSeq);
-}
-```
-
-**What can break it:** sequence number reuse across chains, reset during guardian rotation, missing sequence gaps that allow replay of old messages.
-
-**Decomposition:**
-- Per-chain: sequence number storage, increment logic, replay guard.
-- Cross-check: no (chain_id, sequence) pair processed more than once across any chain.
-
-### Fee Invariance
-
-Cross-chain operations with fees must preserve value through the bridge, accounting for the fee.
-
-```solidity
-/// @crosschain src=ethereum dst=polygon
+/// @observation AFTER_ALL_DELIVERED
+/// @correlation messageHash
 function invariant_bridge_fee_preservation() public {
     uint totalSent = bridgeEth.totalSent();
     uint totalReceived = bridgePoly.totalReceived();
@@ -136,70 +213,52 @@ function invariant_bridge_fee_preservation() public {
 }
 ```
 
-**What can break it:** fee parameter changed mid-flight, fee calculated differently on each chain, dust accumulation from rounding.
-
 ---
 
-## Invariant Scope
+## Observation Policy Matrix
 
-### Primary: Cross-Chain
-
-Properties spanning multiple chains. These are the harness' primary target. Annotated with `@crosschain` and references to chain aliases registered in the chain config.
-
-### Supported for Completeness: Single-Chain
-
-Invariants without `@crosschain` are treated as single-chain (degenerate case: one chain, identity recomposition). These follow the standard Foundry invariant convention and are compatible with all tools.
-
----
-
-## Invariant Types & Tool Selection
-
-The harness classifies invariants to decide which tools to run and in what order:
-
-| Type | Example | Priority Tools |
+| Policy | When Checked | Example Use |
 |---|---|---|
-| **Balance conservation** | `locked_A == minted_B` | Halmos (symbolic equality), Echidna (fuzz extremes) |
-| **Quorum threshold** | `valid_sigs >= M` | Halmos (prove bound), Echidna (boundary fuzz) |
-| **Guardian consistency** | `guardian_set_A == guardian_set_B` | Slither (access control gaps), Halmos (storage equality) |
-| **Replay protection** | `sequence unique per (src,dst)` | Echidna (sequence fuzzing), Slither (missing checks) |
-| **State machine** | `status transition valid` | Echidna (sequence exploration) |
-| **Access control** | `only guardian can authorize` | Slither (missing modifiers), Echidna (trigger bypass) |
+| `PER_TRANSACTION` | After every state change | Quorum, replay protection, access control |
+| `AFTER_FINALITY` | After N block confirmations | Balance equality (avoids reorg false positives) |
+| `AFTER_ALL_DELIVERED` | After all emitted messages delivered | Locked==minted, fee preservation |
+| `BLOCK_BOUNDED(N)` | Within N blocks of trigger event | Liveness: "message delivered within 100 blocks" |
 
 ---
 
-## Invariant Metadata
+## Invariant Types & Tool Fit
 
-NatSpec tags for harness configuration:
+| Type | Observation | Priority Tools |
+|---|---|---|
+| **Balance conservation** | Eventual | Echidna (fuzz extremes), Halmos (symbolic equality under bounds) |
+| **Quorum threshold** | Safety | Halmos (bounded proof), Echidna (boundary fuzz) |
+| **Guardian consistency** | Safety | Slither (access gaps), Halmos (storage equality under bounds) |
+| **Replay protection** | Safety | Echidna (sequence fuzz), Slither (missing consume-before-call) |
+| **Liveness** | Eventually | Echidna (explore delivery paths), manual analysis for deadline bounds |
+
+---
+
+## Invariant Metadata (NatSpec)
 
 ```solidity
 /// @crosschain src=ethereum dst=polygon
+/// @observation AFTER_ALL_DELIVERED
+/// @correlation messageHash
+/// @assume guardian_honesty: at_most_6_malicious
 /// @tools echidna, halmos
 /// @severity CRITICAL
 /// @timeout 600
-function invariant_locked_equals_minted() public { ... }
+function invariant_locked_equals_minted_after_delivery() public { ... }
 ```
 
 | Tag | Effect |
 |---|---|
-| `@crosschain` | Mark as cross-chain. `src` and `dst` reference chain aliases |
-| `@tools` | Restrict which tools probe this invariant (default: all) |
-| `@severity` | Override impact label (CRITICAL, HIGH, MEDIUM, LOW) |
+| `@crosschain src=X dst=Y` | Mark as cross-chain, specify participating chains |
+| `@observation POLICY` | When the invariant is checked |
+| `@correlation KEY` | How to pair events across chains (e.g., `messageHash`) |
+| `@assume KIND: VALUE` | Scope assumption (honesty threshold, ordering model) |
+| `@tools` | Restrict which tools probe this invariant |
+| `@severity` | Impact label (CRITICAL, HIGH, MEDIUM, LOW) |
 | `@timeout` | Per-invariant timeout in seconds |
 
----
-
-## Constraints from Invariants
-
-Cross-chain invariants generate constraints that feed the search. For a quorum invariant `valid_sigs >= THRESHOLD`, the harness extracts:
-
-```
-Constraint(
-    kind=STATE_VAR,
-    target="verified_signatures",
-    value=Range(0, THRESHOLD),
-    chain="ethereum",
-    source="invariant:valid_quorum_required"
-)
-```
-
-The beam search is directed toward paths where `verified_signatures` is near `THRESHOLD` — the boundary where edge cases live.
+Tags that cannot be expressed in Solidity (observation, correlation, assumptions) must be provided via NatSpec or the invariant IR. The `.t.sol` parser validates that these are present for cross-chain invariants and warns if defaults are used silently.

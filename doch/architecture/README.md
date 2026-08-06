@@ -1,8 +1,8 @@
 # Architecture
 
-Astarots is a **cross-chain invariant testing harness**. It takes invariants that span multiple chains — bridge balance equality, message replay protection, guardian quorum thresholds — decomposes them into per-chain sub-probes, runs guided search through multiple analysis tools, and recombines the results to verify the full cross-chain property.
+Astarots is a **cross-chain invariant testing harness**. It takes invariants that span multiple chains — bridge balance equality, message replay protection, guardian quorum thresholds — and discovers edge cases through guided search across multiple analysis tools.
 
-The core idea: a cross-chain invariant is broken into single-chain assertions, each probed independently by the best tool for that chain's context. The harness then checks that no combination of per-chain violations violates the overall cross-chain property. This decomposition is what makes deep cross-chain edge cases discoverable — no single tool can simulate two chains simultaneously at the depth required.
+The core idea: a cross-chain invariant is broken into per-chain sub-probes, each analyzed by the best tool for that chain's context. A cross-chain message coordinator manages the causal dependency between chains — messages emitted on the source must be delivered to the destination before the destination's state can be checked. The harness then recombines per-chain findings to verify the full cross-chain property.
 
 ---
 
@@ -24,6 +24,13 @@ The core idea: a cross-chain invariant is broken into single-chain assertions, e
 │  │   Invariant   │──▶│  Cross-Chain     │──▶│  Chain Registry  │  │
 │  │   Loader      │   │  Decomposer      │   │  (eth, poly, ...)│  │
 │  └───────────────┘   └────────┬─────────┘   └──────────────────┘  │
+│                               │                                    │
+│                               ▼                                    │
+│                    ┌──────────────────────┐                        │
+│                    │  Message Coordinator │                        │
+│                    │  - lifecycle tracking│                        │
+│                    │  - causal ordering   │                        │
+│                    └──────────┬───────────┘                        │
 │                               │                                    │
 │         ┌─────────────────────┼─────────────────────┐             │
 │         ▼                     ▼                     ▼             │
@@ -57,7 +64,7 @@ The core idea: a cross-chain invariant is broken into single-chain assertions, e
 │                             ▼                                     │
 │  ┌──────────────────────────────────────────────────────────┐    │
 │  │               Report Engine                                │    │
-│  │  - console (per-chain trace)    - JSON    - HTML           │    │
+│  │  - console (per-chain trace)    - JSON                     │    │
 │  └──────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -68,52 +75,66 @@ The core idea: a cross-chain invariant is broken into single-chain assertions, e
 
 ### Invariant Loader
 
-Parses `.t.sol` test files and extracts cross-chain invariant function signatures. Identifies the `@crosschain` NatSpec tag specifying source and destination chains. Produces a normalized `CrossChainInvariant` struct containing per-chain contract references and the cross-chain assertion. Also supports single-chain invariants for completeness, but they are treated as a degenerate case (one chain, trivial recomposition).
+Parses `.t.sol` test files and extracts cross-chain invariant function signatures. Identifies NatSpec tags (`@crosschain`, `@observation`, `@correlation`, `@assume`) and produces a normalized `CrossChainInvariant` struct. The IR carries the full invariant specification: contexts per chain, observation policy, correlation key, assumptions, and the property predicate.
 
 ### Cross-Chain Decomposer
 
-Breaks a cross-chain invariant into per-chain sub-invariants. For a bridge invariant like `locked_src == minted_dst`, the decomposer produces:
+Breaks a cross-chain invariant into per-chain sub-invariants using the correlation key and observation policy from the IR. The decomposer does **not** invent semantics — it uses the metadata the developer provided. For a balance invariant with `@correlation messageHash` and `@observation AFTER_ALL_DELIVERED`:
 
-- **Sub-invariant for source chain:** `locked_src` never decreases without a corresponding message event.
-- **Sub-invariant for destination chain:** `minted_dst` never increases without a corresponding message event.
-- **Cross-chain check (Python):** for every message event pair, `locked_src(event) == minted_dst(event)`.
+- **Sub-invariant for source chain:** `locked_src` only changes through valid deposit, verified burn, or expired-message refund events.
+- **Sub-invariant for destination chain:** `minted_dst` only changes through verified lock events with unique `messageHash`.
+- **Cross-check:** after all eligible messages are delivered, `locked_src(event) == minted_dst(event)` for every correlated pair.
 
-Each sub-invariant is a standard single-chain assertion that adapters can handle natively. The decomposer also determines which tool-adapter combinations are most effective for each sub-invariant based on the property type.
+The decomposer validates that the invariant IR is complete — missing correlation key or observation policy is a hard error, not a silent default.
 
 ### Chain Registry
 
-Manages per-chain configuration: RPC endpoints, contract deployments, mock relayer setup, and chain-specific tool settings. Each chain is registered with a unique alias (`eth`, `poly`) used throughout the harness. The chain registry also handles mock cross-chain communication — simulating message passing between chains for tools that execute concrete sequences.
+Manages per-chain configuration: RPC endpoints, contract deployments, and chain-specific tool settings. Each chain is registered with a unique alias used throughout the harness.
+
+### Cross-Chain Message Coordinator
+
+Cross-chain execution is **causal**: the destination chain's state depends on messages emitted by the source chain. The coordinator manages this dependency through an explicit message lifecycle:
+
+```
+Emitted → SourceFinalized → RelayEligible → Delivered → Consumed | Rejected | Expired
+```
+
+The coordinator tracks pending messages and determines eligibility based on finality depth, ordering guarantees, and epoch boundaries. It models delay, duplicate delivery, replay, reorg depth, block timestamps, and guardian-set versioning as first-class constraints.
+
+Static analysis (Slither) and initial local probing (Echidna corpus generation) run independently on each chain — they do not require message delivery. Once a source-chain probe emits a cross-chain event, the coordinator injects the corresponding message into the destination chain before the destination probe executes. Execution is causally ordered, not independent.
 
 ### Per-Chain Scheduler
 
-One scheduler instance per chain. Each runs the beam search independently on its assigned sub-invariant, using the shared search engine. Schedulers can run in parallel — they operate on separate chains and their search states are independent. The per-chain schedulers produce per-chain `EdgeCase` lists.
+One scheduler instance per chain. Each runs beam search on its assigned sub-invariant using the shared search engine. Schedulers operate concurrently for independent work (static analysis, initial probing) and serialize through the coordinator when causal dependencies exist. Per-chain schedulers produce `SearchResult` structs containing both candidates and local findings — not just violations.
 
 ### Search Engine
 
-The core algorithm shared across all per-chain schedulers. Houses `SearchState`, `EdgeCase`, the priority queue frontier, constraint deduplication, and the main `deepest_edge()` loop. The search engine is chain-agnostic — it receives a chain context from the scheduler and passes it through to adapters.
+The core algorithm shared across all per-chain schedulers. Houses `SearchState`, `SearchResult`, the priority queue frontier, constraint deduplication, and the main search loop. The search engine is chain-agnostic — it receives a chain context from the scheduler and passes it through to adapters.
 
 ### Adapter Registry
 
-Maps tool names to adapter implementations. Each adapter conforms to a shared protocol. The registry routes per-chain probe requests to the appropriate adapter, passing chain-specific configuration. Adapters for cross-chain-relevant tools are prioritized: Echidna for concrete sequence fuzzing, Halmos for formal verification of threshold logic, Slither for static detection of missing access control on cross-chain entry points.
+Maps tool names to adapter implementations. Each adapter exposes its capabilities (`ToolCapabilities`) so the scheduler can select the right tool for each probe type. The registry routes per-chain probe requests to the appropriate adapter with chain-specific configuration.
 
 ### Cross-Chain Recombiner
 
-After all per-chain searches complete, the recombiner merges findings and checks the original cross-chain invariant. It correlates per-chain `EdgeCase` lists: a source-chain finding about `locked` state combined with a destination-chain finding about `minted` state may together violate the cross-chain property even if neither chain's sub-invariant broke in isolation. This is where the deepest cross-chain edge cases emerge — they are invisible to per-chain probing but detectable at the recombination layer.
+After all per-chain searches complete, the recombiner merges `SearchResult` structs and checks the original cross-chain invariant. It correlates per-chain candidates by the `correlation_key`, evaluates the cross-chain predicate, and produces `CrossChainEdgeCase` findings. A source-chain candidate with a valid-but-suspicious state combined with a destination-chain candidate may violate the cross-chain property even if neither chain's local invariant broke — this is where the deepest cross-chain edge cases emerge.
 
 ### Report Engine
 
-Renders findings with per-chain trace annotations. Each call in a cross-chain attack sequence is labeled with the chain it executes on and the tool that discovered it. The report distinguishes between per-chain findings and true cross-chain violations.
+Renders findings with per-chain trace annotations. Each call in a cross-chain attack sequence is labeled with the chain it executes on and the tool that discovered it. Output formats: console (for development) and JSON (for CI and programmatic consumption).
 
 ---
 
 ## Key Design Decisions
 
-**Cross-chain is the primary mode.** The harness is designed around multi-chain invariants from the ground up. Single-chain invariants are supported as a degenerate case (one chain, identity recomposition) and will be elevated to first-class in a future milestone.
+**Cross-chain is the primary mode.** The harness is designed around multi-chain invariants from the ground up. Single-chain invariants are supported as a degenerate case and will be elevated to first-class in a future milestone.
 
-**Decomposition happens at the invariant level, not the tool level.** Tools never see "two chains." They see one chain with a sub-invariant. The recombiner handles the multi-chain property. This means all existing single-chain tools work without modification — no tool needs to understand cross-chain semantics.
+**Decomposition is guided by developer-provided metadata, not invention.** The invariant IR requires the developer to specify correlation key and observation policy. The decomposer uses these to produce sub-invariants; it does not guess. Missing metadata is a hard error.
 
-**Per-chain schedulers are independent and parallelizable.** The source chain search and destination chain search share no state. They run concurrently, each benefiting from the full state budget. Only at recombination do results merge.
+**Message lifecycle is an explicit model.** Delay, ordering, duplicate delivery, replay, finality depth, reorg assumptions, and guardian-set epochs are all modeled as constraints. The harness checks against this model to distinguish bugs from valid transient states.
 
-**Adapters are stateless.** Each call receives full chain + constraint context. Adapters can be reused across chains without shared mutable state.
+**Per-chain schedulers are causally coordinated, not fully independent.** Static analysis and initial probing run independently. Once cross-chain messages are emitted, the coordinator serializes the causal dependency. Unrelated probes remain parallelizable.
 
-**The harness mocks cross-chain communication for concrete execution.** When Echidna replays a sequence on the source chain, the harness captures emitted message events and feeds them to the destination chain's mock relayer. This allows concrete replay of cross-chain attack sequences without running a real relayer or two live chains.
+**Adapters expose capabilities, not just a uniform interface.** The adapter protocol includes a `ToolCapabilities` declaration so the scheduler knows which tool can handle which probe type. Slither cannot execute; Echidna cannot symbolically prove. The scheduler routes accordingly.
+
+**The harness uses deterministic twin-state for replay, not vm.mockCall.** Cross-chain replay uses separate EVM state databases or Foundry multi-fork with pinned blocks, not string-based mock calls. This ensures replay is a faithful reproduction of the multi-chain execution.
