@@ -1,8 +1,8 @@
 # Architecture
 
-Astarots is a **cross-chain invariant testing harness**. It takes invariants that span multiple chains — bridge balance equality, message replay protection, guardian quorum thresholds — and discovers edge cases through guided search across multiple analysis tools.
+Astarots is a **cross-chain invariant testing harness** for properties such as bridge accounting, message replay protection, and verifier quorum boundaries.
 
-The core idea: invariants are checked against **forked mainnet state** at pinned blocks, not against freshly deployed contracts. The Wormhole protocol has operated for 5+ years — its code is battle-tested, but the accumulated state (millions of transactions, dozens of guardian rotations, thousands of cross-chain messages in various states) may harbor edge cases invisible to code-level analysis. The harness forks mainnet at a specific block per chain, probes from that state, and discovers attack vectors that emerge from specific state + specific transaction sequences.
+The core idea: invariants are checked against **forked mainnet state** at pinned blocks, not against freshly deployed contracts. Long-lived cross-chain protocols accumulate upgrades, governance epochs, balances, and message state that can expose edge cases invisible to code-only analysis. The harness forks each chain at a coherent snapshot, probes from that state, and discovers attack vectors that require a specific state plus a specific transaction sequence.
 
 ---
 
@@ -10,10 +10,10 @@ The core idea: invariants are checked against **forked mainnet state** at pinned
 
 ```
                       ┌──────────────────────────┐
-                      │    test/*.t.sol            │
-                      │    Cross-chain invariants   │
-                      │    @crosschain src=eth      │
-                      │              dst=poly       │
+                      │ test/invariants/*.t.sol    │
+                      │ Cross-chain invariant IR  │
+                      │ contexts + entry declared │
+                      │ correlation + observation │
                       └────────────┬───────────────┘
                                    │
                                    ▼
@@ -27,46 +27,33 @@ The core idea: invariants are checked against **forked mainnet state** at pinned
 │  └───────────────┘   └────────┬─────────┘   └──────────────────┘  │
 │                               │                                    │
 │                               ▼                                    │
-│                    ┌──────────────────────┐                        │
-│                    │  Message Coordinator │                        │
-│                    │  - lifecycle tracking│                        │
-│                    │  - causal ordering   │                        │
-│                    └──────────┬───────────┘                        │
-│                               │                                    │
-│         ┌─────────────────────┼─────────────────────┐             │
-│         ▼                     ▼                     ▼             │
-│  ┌────────────┐       ┌────────────┐       ┌────────────┐        │
-│  │ Per-Chain  │       │ Per-Chain  │       │ Per-Chain  │        │
-│  │ Scheduler  │       │ Scheduler  │       │ Scheduler  │        │
-│  │ (eth)      │       │ (poly)     │       │ (arb)      │        │
-│  └─────┬──────┘       └─────┬──────┘       └─────┬──────┘        │
-│        │                    │                    │                │
-│        ▼                    ▼                    ▼                │
-│  ┌──────────────────────────────────────────────────────────┐    │
-│  │               Search Engine (shared)                      │    │
-│  │  - beam search    - state dedup    - priority Q           │    │
-│  │  - constraint consistency    - reachability check         │    │
-│  └──────────────────────────┬───────────────────────────────┘    │
-│                             │                                     │
-│                             ▼                                     │
-│  ┌──────────────────────────────────────────────────────────┐    │
-│  │               Adapter Registry                             │    │
-│  │  echidna ─── halmos ─── slither ─── ...                   │    │
-│  └──────────────────────────┬───────────────────────────────┘    │
-│                             │                                     │
-│                             ▼                                     │
-│  ┌──────────────────────────────────────────────────────────┐    │
-│  │               Cross-Chain Recombiner                       │    │
-│  │  - merge per-chain findings                                │    │
-│  │  - verify cross-chain invariant holds                      │    │
-│  │  - detect multi-chain attack vectors                       │    │
-│  └──────────────────────────┬───────────────────────────────┘    │
-│                             │                                     │
-│                             ▼                                     │
-│  ┌──────────────────────────────────────────────────────────┐    │
-│  │               Report Engine                                │    │
-│  │  - console (per-chain trace)    - JSON                     │    │
-│  └──────────────────────────────────────────────────────────┘    │
+│                    ┌────────────────────────────────────────┐     │
+│                    │  Unified Causal Search Engine          │     │
+│                    │  - one branch-local GlobalState        │     │
+│                    │  - message lifecycle + invariant eval  │     │
+│                    │  - frontier, ranking, dedup, budgets   │     │
+│                    └───────────────┬────────────────────────┘     │
+│                                    │                              │
+│             ┌──────────────────────┼──────────────────────┐       │
+│             ▼                      ▼                      ▼       │
+│      ┌────────────┐         ┌────────────┐         ┌────────────┐ │
+│      │  Slither   │         │  Echidna   │         │   Halmos   │ │
+│      │ static hint│         │ candidates │         │ projection │ │
+│      └────────────┘         └────────────┘         └────────────┘ │
+│                                    │                              │
+│                                    ▼                              │
+│                    ┌────────────────────────────────────────┐     │
+│                    │  Canonical Fork Executor               │     │
+│                    │  - pinned base fingerprints            │     │
+│                    │  - branch-local overlays + replay      │     │
+│                    │  - authoritative events/state diffs    │     │
+│                    └───────────────┬────────────────────────┘     │
+│                                    │                              │
+│                                    ▼                              │
+│                    ┌────────────────────────────────────────┐     │
+│                    │  Report Engine                         │     │
+│                    │  - console trace    - JSON evidence    │     │
+│                    └────────────────────────────────────────┘     │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -82,64 +69,104 @@ Parses `.t.sol` test files and extracts cross-chain invariant function signature
 
 Evaluates `QuantifiedPredicate.predicate` strings at runtime. The predicate is a mini expression language over bound variables and chain snapshots. It supports equality (`==`, `!=`), inequality (`<`, `>`, `<=`, `>=`), and logical operators (`&&`, `||`, `!`) over integer variables and array lookups. The engine resolves variable references through the invariant's `Binding` declarations and extracts values from `GlobalState.chain_snapshots`.
 
-This component is necessary because `predicate: str` like `"locked == minted"` must be parsed and evaluated against actual chain state during the search. The expression engine is a bounded evaluator — it does not support arbitrary Solidity expressions, only the subset needed for cross-chain predicate checking. It is implemented as a standalone component, not embedded in the invariant loader or scheduler.
+This component is necessary because predicates such as `"locked == minted"` must be evaluated against actual cross-chain state. The bounded expression engine supports only the documented subset and remains separate from the loader and unified search engine.
 
 ### Cross-Chain Decomposer
 
-Breaks a cross-chain invariant into per-chain sub-invariants using the IR metadata. The decomposer reads `TransitionPredicate` declarations to know which state variables change through which functions, `CorrelationExtractor` to pair source/destination events, `Binding` to map variables across chains, and `QuantifiedPredicate` to express the property. It does **not** invent deposit/burn/refund rules — those come from `@transition` tags in the invariant file.
+Breaks the invariant into local monitors from explicit `TransitionPredicate` rules while preserving the global `Property`, bindings, correlation extractor, and observation semantics. No business rule is inferred from the Solidity assertion body.
 
-For each chain, the decomposer generates assertions:
-- State variable `V` only changes through the functions listed in its `TransitionPredicate`.
-- If a probe finds a path where `V` changes through an undeclared function, that is a violation of the local sub-invariant.
+For each context, the decomposer generates local monitors:
+- Each observed state change must match a declared function selector, effect, guard, and affected binding.
+- An unmatched mutation is a local monitor violation; a matched transition remains a candidate for the global property.
 
-The cross-chain check uses `CorrelationExtractor` to pair events and evaluates the `QuantifiedPredicate` against the bound variables.
+The global check uses the configured `CorrelationExtractor`, resolves bindings, and evaluates the declared safety or bounded-liveness `Property` against one branch-local `GlobalState`.
 
-The decomposer validates that the invariant IR is complete — missing correlation key or observation policy is a hard error, not a silent default.
+The decomposer rejects missing context bindings, correlation extractors, transition rules, or observation semantics rather than applying silent defaults.
 
 ### Chain Registry
 
 Manages per-chain configuration: RPC endpoints, **pinned fork block numbers**, mainnet contract addresses, and chain-specific tool settings. Each chain is registered with a unique alias and a fork block.
 
+```
+TargetSet:
+    contexts: Map[ContextId, ChainTarget]
+
+ChainTarget:
+    context_id: ContextId
+    chain_id: ChainId
+    address: str
+    artifact_path: str
+    artifact_hash: str
+    source_target: Optional[str]
+    role: str
+    expected_runtime_code_hash: str
+    proxy: Optional[ProxyBinding]
+
+ProxyBinding:
+    kind: TRANSPARENT | UUPS | BEACON | NONE
+    implementation_address: Optional[str]
+    expected_implementation_code_hash: Optional[str]
+```
+
+Context IDs are the join key across target configuration, invariant IR, traces, and evidence. Dry-run rejects duplicate IDs, chain mismatches, missing artifacts, source-required adapters without source targets, or fingerprint mismatches before any search state is created.
+
 ### Fork Snapshot Coherence
 
-Choosing independent blocks for each chain does not guarantee a consistent cross-chain snapshot. Two chains may differ in wall-clock time, finality status, guardian-set epoch, observed Wormhole sequence number, upgrade epoch, or delivery cutoff. A **SnapshotSet** enforces coherence:
+Choosing independent blocks does not guarantee a coherent cross-chain snapshot. Chains may differ in time, finality, protocol epoch, upgrade state, observed message cutoff, or delivery status; a `SnapshotSet` makes those relationships explicit.
 
 ```
 SnapshotSet:
+    id: str
+    schema_version: str
     snapshots: Map[ChainId, ForkSnapshot]
-    anchor_timestamp: int              # reference timestamp for cross-chain alignment
+    anchor_timestamp: int              # reference timestamp for alignment
     finality_policy: str               # "probabilistic" | "checkpoint" | "instant"
-    guardian_epoch: int                # active guardian set index at this snapshot
-    source_message_cutoff: int         # last Wormhole sequence emitted on source
-    consistency_proof: str             # how this set was validated as coherent
+    protocol_epochs: Map[str, str]      # adapter-defined epochs, if applicable
+    message_cutoffs: Map[EmitterId, int] # last included message per emitter
+    coherence_checks: list[CoherenceCheck]
+    coherence_checks_hash: str
+
+CoherenceCheck:
+    kind: str                           # timestamp_delta, finality, epoch, cutoff, ...
+    observed: Any
+    relation: str                       # <=, ==, contains, ...
+    expected: Any
+    evidence_hash: str
 ```
 
-The set is validated: block hashes, state roots, target code hashes, and proxy implementation addresses are recorded per chain. A `consistency_proof` documents the methodology used to establish coherence (e.g., "blocks within 5-minute window; same guardian_set_index on both chains; Wormhole sequence gap ≤ 3").
+The set is validated before probing. Block hashes, state roots, target code hashes, proxy implementations, and every structured coherence check are recorded. Protocol-specific adapters may add checks without hard-coding one bridge's epoch model into the core.
 
 ### Relay Dataset
 
-Wormhole messages are emitted as events on the source chain, then Guardians form signed VAAs off-chain. The destination chain receives VAAs via a relayer. The forked EVM state does **not** contain a list of emitted-but-undelivered VAAs. A separate **RelayDataset** artifact bridges this gap:
+Forked EVM state does not contain a universal list of emitted-but-undelivered cross-chain messages. A separate, content-addressed **RelayDataset** supplies the message and attestation material required by the selected protocol adapter:
 
 ```
 RelayDataset:
-    source_chain: ChainId
-    source_block_range: (int, int)
-    messages: list[RelayMessage]
-    indexed_by: str                    # "sequence" | "vaa_hash" | "emitter"
-    provenance: str                    # "indexed-logs" | "historical-vaas" | "relayer-api"
-    provenance_hash: str               # hash of source data for reproducibility
+    schema_version: str
+    dataset_hash: str
+    protocol: str
+    source_block_ranges: Map[ChainId, (int, int)]
+    messages: list[ProtocolMessageEnvelope]
+    provenance: str                    # indexed-logs, historical-attestations, API
+    provenance_hash: str
 
-RelayMessage:
-    emitter: str                       # contract address
-    sequence: int                      # Wormhole sequence number
-    payload: bytes                     # raw message payload
-    vaa_bytes: bytes                   # full signed VAA (if available from Guardian network)
-    vaa_hash: str                      # VAA hash for correlation
-    guardian_set_index: int            # guardian set epoch
-    destination_status: str            # "delivered" | "pending" | "expired" | "unknown"
+ProtocolMessageEnvelope:
+    message_id: bytes
+    correlation_value: bytes
+    source_chain: ChainId
+    source_block_hash: bytes32
+    source_log_index: int
+    emitter: str
+    destination_chain: ChainId
+    destination_context: ContextId
+    payload: bytes
+    attestation: Optional[bytes]
+    destination_status: Delivered | Pending | Expired | Unknown
+    status_evidence_hash: str
+    protocol_metadata: Map[str, Any]
 ```
 
-Sources: indexed source-chain logs, historical signed VAAs from Guardian network API, destination consumption state, or pinned relayer API datasets (with content hashes for evidence integrity).
+Each protocol adapter maps its native message identifier, proof bytes, verifier epoch, and delivery metadata into `ProtocolMessageEnvelope`; fetched artifacts are pinned by content hash.
 
 ### Cross-Chain Message Coordinator
 
@@ -149,43 +176,67 @@ Cross-chain execution is **causal**: the destination chain's state depends on me
 Emitted → SourceFinalized → RelayEligible → Delivered → Consumed | Rejected | Expired
 ```
 
-The coordinator tracks pending messages and determines eligibility based on finality depth, ordering guarantees, and epoch boundaries. It models delay, duplicate delivery, replay, reorg depth, block timestamps, and guardian-set versioning as first-class constraints.
+```
+RelayPolicy:
+    mode: HistoricalAuthentic | ProtocolValidSynthetic | ModeledRelay | RawPayload
+    protocol_adapter: str
+    adapter_config_hash: str
+    finality_blocks: Map[ChainId, int]
+    delay_model: NONE | FIXED | BOUNDED | DATASET
+    min_delay_seconds: Map[ChainId, int]
+    max_delay_seconds: Map[ChainId, int]
+    ordering: FIFO_PER_EMITTER | UNORDERED | PROTOCOL_DEFINED
+    duplicate_delivery: REJECT | ALLOW_FOR_TEST
+    reorg_assumption: NO_REORG_AFTER_FINALITY
+    delivery_deadline: Optional[Deadline]
+    protocol_epoch_rules: Map[str, Any]
+```
 
-Static analysis (Slither) and initial local probing (Echidna corpus generation) run independently on each chain — they do not require message delivery. Once a source-chain probe emits a cross-chain event, the coordinator injects the corresponding message into the destination chain before the destination probe executes. Execution is causally ordered, not independent.
+Each lifecycle transition has a guard derived from this policy and the protocol adapter. Invalid transitions are rejected rather than added to the frontier; rejected and expired messages are handled by the invariant's quiescence rule.
 
-### Per-Chain Scheduler
+Mode controls proof availability. `HistoricalAuthentic` can deliver only an exact dataset envelope whose message ID, payload hash, source event, and attestation all match; a newly fuzzed source event without such an envelope remains ineligible. `ProtocolValidSynthetic` asks a declared local signer/verifier fixture to create valid test proofs, `ModeledRelay` applies the configured abstraction, and `RawPayload` deliberately explores unauthenticated input after the trust-boundary label is recorded.
 
-One scheduler instance per chain. Each runs beam search on its assigned sub-invariant starting from the **forked mainnet state** at the configured block. The scheduler does not deploy contracts — it connects to the fork and probes from the existing state. Schedulers operate concurrently for independent work (static analysis, initial probing) and serialize through the coordinator when causal dependencies exist. Per-chain schedulers produce `SearchResult` structs containing both candidates and local findings — not just violations.
+The coordinator tracks eligibility and models delay, ordering, duplicate delivery, replay, chain clocks, and protocol-defined epoch changes as branch-local constraints. `finality_blocks` defines the confirmations required before `SourceFinalized`; the milestone assumes no reorg after that boundary and records the assumption in evidence rather than pretending to simulate arbitrary alternate chain histories.
 
-### Search Engine
+Static analysis (Slither) and initial local probing (Echidna corpus generation) can run independently on each chain because they do not mutate shared state. Once canonical replay emits a cross-chain event, the coordinator records it and schedules only lifecycle transitions allowed by the selected relay mode. Destination execution is causally ordered after eligible delivery, never produced by merging independent per-chain snapshots.
 
-The core algorithm shared across all per-chain schedulers. Houses `SearchState`, `SearchResult`, the priority queue frontier, constraint deduplication, and the main search loop. The search engine is chain-agnostic — it receives a chain context from the scheduler and passes it through to adapters.
+### Candidate Workers
+
+Tool adapters perform parallelizable local work: static analysis, corpus generation, fuzzing, or bounded symbolic confirmation. They return typed hints and candidate traces; they do not own the global frontier or merge independent chain states.
+
+### Unified Causal Search Engine
+
+One search engine owns the global priority queue and every immutable branch-local `GlobalState`. It chooses the next chain action, asks candidate workers for proposals, sends each proposal to the canonical executor, advances the message lifecycle, and evaluates the invariant directly against the resulting global snapshot. There is one `SearchResult` for the campaign, not one result per chain.
+
+### Canonical Fork Executor
+
+The canonical executor is the sole source of truth for reachability, events, and state diffs. It initializes pinned forks from a `SnapshotSet`, manages branch-local checkpoints or copy-on-write overlays, applies relay transitions, and exports deterministic `ActionTrace` artifacts. Tool-internal snapshots never become global state.
 
 ### Adapter Registry
 
-Maps tool names to adapter implementations. Each adapter exposes its capabilities (`ToolCapabilities`) so the scheduler can select the right tool for each probe type. The registry routes per-chain probe requests to the appropriate adapter with chain-specific configuration.
+Maps tool names to adapter implementations and capabilities. The registry routes candidate-generation or confirmation requests with chain-specific configuration; unsupported operations return `Unsupported` and fall back to another capable tool.
 
-### Cross-Chain Recombiner
+### Evidence Aggregator
 
-After all per-chain searches complete, the recombiner merges `SearchResult` structs and checks the original cross-chain invariant. It correlates per-chain candidates by the `correlation_key`, evaluates the cross-chain predicate, and produces `CrossChainEdgeCase` findings. A source-chain candidate with a valid-but-suspicious state combined with a destination-chain candidate may violate the cross-chain property even if neither chain's local invariant broke — this is where the deepest cross-chain edge cases emerge.
+Collects per-step evidence from the single causal trace, applies explicit evidence-strength aggregation rules, and emits `CrossChainEdgeCase` findings. It never combines witnesses from unrelated branches.
 
 ### Actor & Privilege Model
 
-The scheduler can impersonate any address on a fork via `vm.prank`. Without constraints, this produces false positives — an "attacker" with governance privileges or unlimited balance is not a realistic threat. Every action in a call sequence carries an explicit actor:
+The unified search engine can impersonate addresses on local forks, but unconstrained impersonation creates false positives. Every action therefore carries an explicit actor:
 
 ```
 Actor:
     address: str                      # 0x...
-    role: str                         # "attacker" | "guardian" | "governance" | "relayer" | "user" | "admin"
+    role: str                         # "attacker" | "signer" | "governance" | "relayer" | "user" | "admin"
     provenance: str                   # "fork_state" | "generated" | "derived_from_event"
-    privilege_level: str              # "none" | "basic" | "operator" | "guardian" | "governance"
-    impersonation_allowed: bool       # may the scheduler impersonate this actor?
+    privilege_level: str              # "none" | "basic" | "operator" | "signer" | "governance"
+    impersonation_allowed: bool       # permitted by the campaign actor policy?
     funding_method: str               # "from_fork_balance" | "deal" | "transfer_from_whale"
 ```
 
 Findings are classified by the attacker model they require:
 - **permissionless** — any external actor with no special privileges
-- **compromised_guardian** — requires control of one or more guardian keys
+- **compromised_signer** — requires control of one or more protocol signing keys
 - **compromised_governance** — requires governance execution privileges
 - **privileged_operator** — requires operator/admin role
 - **state_only** — invariant violation that exists in the forked state without any attacker action
@@ -202,14 +253,14 @@ Renders findings with per-chain trace annotations. Each call in a cross-chain at
 
 **Cross-chain is the primary mode.** The harness is designed around multi-chain invariants from the ground up. Single-chain invariants are supported as a degenerate case and will be elevated to first-class in a future milestone.
 
-**Decomposition is guided by developer-provided metadata, not invention.** The invariant IR requires the developer to specify correlation key and observation policy. The decomposer uses these to produce sub-invariants; it does not guess. Missing metadata is a hard error.
+**Decomposition validates declared semantics; it does not invent them.** Contexts, transition predicates, correlation extractors, bindings, observation policy, and bounded observation sets are all explicit inputs.
 
-**Message lifecycle is an explicit model.** Delay, ordering, duplicate delivery, replay, finality depth, reorg assumptions, and guardian-set epochs are all modeled as constraints. The harness checks against this model to distinguish bugs from valid transient states.
+**Message lifecycle is an explicit model.** Delay, ordering, duplicate delivery, replay, finality, reorg assumptions, and protocol-defined epochs are modeled as constraints so valid transient states are not mislabeled as bugs.
 
-**Per-chain schedulers are causally coordinated through the message lifecycle.** Static analysis and initial probing run independently. Once cross-chain messages are emitted, the coordinator serializes the causal dependency. Unrelated probes remain parallelizable.
+**The unified frontier is causal.** Static analysis and initial candidate generation may run in parallel, but one search engine owns the frontier. Once a message is emitted, the coordinator and canonical executor serialize its lifecycle within that branch-local trace.
 
-**Adapters expose capabilities, not just a uniform interface.** The adapter protocol includes a `ToolCapabilities` declaration so the scheduler knows which tool can handle which probe type. Slither cannot execute; Echidna cannot symbolically prove. The scheduler routes accordingly.
+**Adapters expose capabilities.** Slither cannot execute, Echidna cannot symbolically prove, and Halmos currently confirms only projected state; the unified search engine routes each operation accordingly.
 
-**The harness operates on forked mainnet state, not fresh deploys.** All execution starts from a pinned mainnet block. The contracts are already deployed at known addresses with years of accumulated state. Constraint extraction reads real storage values, real guardian sets, real pending message queues. The search starts from the actual state of the protocol — not from an empty deployment. Fresh deploys are only used for unit-testing the harness itself, never for production probe runs.
+**The harness operates on forked mainnet state, not fresh deploys.** Execution starts from pinned blocks and deployed addresses. Constraint extraction reads lazy-loaded on-chain storage plus messages supplied by a content-addressed `RelayDataset`; a fork alone is never assumed to contain all pending cross-chain attestations. Fresh deploys are reserved for harness unit tests.
 
-**The harness uses deterministic twin-state for replay, not vm.mockCall.** Cross-chain replay creates fresh forks from the same RPC base blocks and replays the recorded `ActionTrace` + `EnvironmentTransitions`. This is not a "fork of an in-memory fork" — it is a deterministic replay from the same on-chain base state. Each tool replays the same trace independently from the same `BaseForkFingerprint`.
+**Replay starts from recorded base fingerprints.** Fresh forks are created from the same RPC blocks and the recorded `ActionTrace`—including environment transitions—is replayed deterministically. No in-memory fork is itself forked, and tool-internal snapshot handles are never shared.

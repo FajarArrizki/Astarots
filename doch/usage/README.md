@@ -9,21 +9,29 @@ Astarots is invoked from the command line. Cross-chain invariant testing require
 Given a Foundry project with bridge contracts on Ethereum and Polygon, and invariants at `test/invariants/BridgeInvariants.t.sol`:
 
 ```bash
-# Step 1: Register chains with pinned fork blocks
-#         Blocks must be archive-node accessible (historical state queries)
-astarots chain add ethereum --rpc "$ETH_RPC_URL" --chain-id 1   --fork-block 18500000
-astarots chain add polygon  --rpc "$POLY_RPC_URL" --chain-id 137 --fork-block 49800000
+# Register coherent pinned forks without expanding RPC secrets in argv
+astarots chain add ethereum --rpc-env ETH_RPC_URL \
+    --chain-id 1 --fork-block 18500000
+astarots chain add polygon --rpc-env POLY_RPC_URL \
+    --chain-id 137 --fork-block 49800000
 
-# Step 2: Run probe (explicit chain-to-contract binding)
+# Bind deployed contexts and their compiled artifacts
 astarots probe \
-    --target ethereum=src/BridgeEth.sol \
-    --target polygon=src/BridgePoly.sol \
+    --target ethereum.bridge=0xEthBridge \
+    --artifact ethereum.bridge=out/IBridgeEth.sol/IBridgeEth.json \
+    --source ethereum.bridge=src/BridgeEth.sol \
+    --target polygon.bridge=0xPolyBridge \
+    --artifact polygon.bridge=out/IBridgePoly.sol/IBridgePoly.json \
+    --source polygon.bridge=src/BridgePoly.sol \
     --invariants test/invariants/ \
+    --relay-dataset artifacts/relay/messages.json \
+    --relay-mode protocol-valid-synthetic \
+    --relay-config astarots.relay.toml \
     --tools echidna,halmos,slither \
-    --max-depth 4
+    --max-depth 8
 ```
 
-This command compiles both contracts, decomposes cross-chain invariants into per-chain sub-invariants, runs adaptive beam search with causal coordination across chains, recombines findings, and prints per-chain traces with cross-chain correlation.
+This command validates the `SnapshotSet`, loads the relay dataset, runs one unified causal search, replays every tool proposal through the canonical fork executor, and evaluates invariants against branch-local global snapshots.
 
 ---
 
@@ -34,7 +42,7 @@ This command compiles both contracts, decomposes cross-chain invariants into per
 Manage chain configurations. Chains must be registered before probing.
 
 ```
-astarots chain add <alias> --rpc <URL> --chain-id <ID> --fork-block <BLOCK>
+astarots chain add <alias> --rpc-env <ENV_NAME> --chain-id <ID> --fork-block <BLOCK>
 astarots chain rm  <alias>
 astarots chain list
 ```
@@ -42,9 +50,12 @@ astarots chain list
 Example:
 
 ```bash
-astarots chain add ethereum  --rpc $ETH_RPC_URL  --chain-id 1
-astarots chain add polygon   --rpc $POLY_RPC_URL --chain-id 137
-astarots chain add arbitrum  --rpc $ARB_RPC_URL  --chain-id 42161
+astarots chain add ethereum --rpc-env ETH_RPC_URL \
+    --chain-id 1 --fork-block 18500000
+astarots chain add polygon --rpc-env POLY_RPC_URL \
+    --chain-id 137 --fork-block 49800000
+astarots chain add arbitrum --rpc-env ARB_RPC_URL \
+    --chain-id 42161 --fork-block 120000000
 ```
 
 ### `probe`
@@ -55,32 +66,45 @@ Run guided search against cross-chain invariants — starting from forked mainne
 astarots probe [OPTIONS]
 
 Options:
-  --target CHAIN=CONTRACT    Explicit chain-to-contract binding, repeatable
-                              e.g. --target ethereum=src/BridgeEth.sol
-  --invariants PATH          Directory containing .t.sol invariant files
-  --tools LIST               Comma-separated tool names (default: echidna,halmos,slither)
-  --max-depth N              Maximum search depth per chain (default: 4)
-  --beam LIST                Beam widths per depth, e.g. "4,3,2,1" (default: adaptive)
-  --max-states N             Hard cap on total explored states per chain (default: 200)
-  --timeout N                Per-invariant timeout in seconds (default: 600)
-  --output FORMAT            Output format: console, json (default: console)
-  --focus FUNCTION           Only probe a specific invariant function
-  --dry-run                  Validate configuration without running tools
+  --target CONTEXT=ADDRESS    Deployed target, e.g. ethereum.bridge=0x...
+  --artifact CONTEXT=PATH     Compiled ABI/storage-layout artifact for the context
+  --source CONTEXT=PATH       Source target for source-level tools such as Slither
+  --invariants PATH           Directory containing invariant specifications
+  --relay-dataset PATH        Content-addressed message/attestation dataset
+  --relay-mode MODE           historical-authentic, protocol-valid-synthetic,
+                             modeled-relay, or raw-payload
+  --relay-config PATH         Protocol adapter and local proof-fixture configuration
+  --actor-policy PATH         Allowed actors, privileges, funding, impersonation
+  --tools LIST                Candidate/confirmation tools
+  --max-depth N               Maximum global causal action depth (default: 8)
+  --branching-caps LIST       Per-depth candidate caps (default: 4,4,3,3,2,2,1,1)
+  --max-states N              Global authoritative execution cap (default: 200)
+  --timeout N                 Per-invariant timeout seconds (default: 600)
+  --output FORMAT             console or json (default: console)
+  --resume RUN_ID             Resume from a compatible persisted frontier
+  --focus FUNCTION            Restrict to one invariant
+  --dry-run                   Validate targets, snapshots, IR, and datasets
 ```
 
 ### Target Binding
 
-Target contracts are bound to chains explicitly using `chain=contract` syntax, not positionally:
+Each repeatable target uses `chain.context=deployed-address`; its compiled artifact and optional source target are supplied separately. Source is required when a selected adapter needs source-level analysis. This supports multiple contracts on one chain without positional matching:
 
 ```bash
 astarots probe \
-    --target ethereum=src/BridgeEth.sol \
-    --target polygon=src/BridgePoly.sol \
-    --chains ethereum,polygon \
+    --target ethereum.core=0xCore \
+    --artifact ethereum.core=out/ICore.sol/ICore.json \
+    --source ethereum.core=src/Core.sol \
+    --target ethereum.token_bridge=0xTokenBridge \
+    --artifact ethereum.token_bridge=out/ITokenBridge.sol/ITokenBridge.json \
+    --source ethereum.token_bridge=src/TokenBridge.sol \
+    --target polygon.token_bridge=0xPolyTokenBridge \
+    --artifact polygon.token_bridge=out/ITokenBridge.sol/ITokenBridge.json \
+    --source polygon.token_bridge=src/TokenBridge.sol \
     --invariants test/invariants/
 ```
 
-Positional matching (order of `--target` matching order of `--chains`) is deprecated and emits a warning.
+Every address, runtime code hash, proxy implementation, and artifact hash is validated at the configured block. Context IDs bind targets explicitly; chain order is never inferred positionally.
 
 ### `replay`
 
@@ -90,11 +114,13 @@ Re-execute a previously found cross-chain edge case. Uses deterministic twin-sta
 astarots replay [OPTIONS]
 
 Options:
-  --edge-case PATH           Path to a saved EdgeCase JSON file
-  --target CHAIN=CONTRACT    Contracts to replay against (repeatable)
-  --chains LIST              Chain aliases for replay
-  --output PATH              Where to write the replay trace
+  --edge-case PATH           Saved finding with fingerprints and ActionTrace
+  --target CONTEXT=ADDRESS   Optional replacement/fixed deployment
+  --artifact CONTEXT=PATH    Artifact for a replacement target
+  --output PATH              Replay trace destination
 ```
+
+A replacement target must provide every selector used by the recorded trace and pass artifact, runtime-code, proxy-kind, and implementation validation. Any ABI or proxy mismatch is an invalid replay configuration, not an execution failure.
 
 ### `list-tools`
 
@@ -114,25 +140,30 @@ Output:
 
 ### `init`
 
-Scaffold a cross-chain invariant test file.
+Scaffold a parser-only cross-chain invariant specification bound to existing deployments:
 
 ```
-astarots init --target ethereum=src/BridgeEth.sol --target polygon=src/BridgePoly.sol
+astarots init \
+    --target ethereum.bridge=0xEthBridge \
+    --artifact ethereum.bridge=out/IBridgeEth.sol/IBridgeEth.json \
+    --target polygon.bridge=0xPolyBridge \
+    --artifact polygon.bridge=out/IBridgePoly.sol/IBridgePoly.json
 ```
 
-Creates `test/invariants/BridgeInvariants.t.sol` with skeleton cross-chain invariant functions. The developer fills in assertion bodies.
+The generated `.t.sol` file contains NatSpec IR plus a human-readable assertion. Astarots generates executable per-chain harnesses; it does not deploy the targets.
 
 ---
 
 ## Precedence
 
-Configuration is resolved in this order, with later sources overriding earlier ones:
+Configuration sources resolve in this order, with later sources overriding earlier ones:
 
 1. Built-in defaults
-2. `astarots.toml` project configuration
-3. `@` NatSpec tags in `.t.sol` invariant files
-4. Environment variables (`$VAR` references in config values)
-5. CLI flags (highest precedence)
+2. `astarots.toml`
+3. NatSpec invariant metadata
+4. CLI flags
+
+Environment references are interpolated **after** precedence selects the winning value; interpolation is not a separate precedence layer.
 
 ---
 
@@ -150,14 +181,20 @@ Configuration is resolved in this order, with later sources overriding earlier o
 
 ## RPC Secret Protection
 
-RPC URLs containing secrets (API keys, tokens) are referenced via environment variables:
+RPC configuration stores an environment-variable name rather than an expanded URL:
 
 ```toml
 [chains.ethereum]
-rpc_url = "$ETH_RPC_URL"  # resolved from environment at runtime
+rpc_env = "ETH_RPC_URL"
 ```
 
-Direct embedding of secrets in config files or CLI flags is discouraged. The harness never logs RPC URLs.
+The harness resolves it only when spawning the fork backend, redacts process diagnostics, and never records the URL or secret value. CLI uses `--rpc-env ETH_RPC_URL`, not `--rpc "$ETH_RPC_URL"`.
+
+## Cache and Resume
+
+`astarots probe --resume RUN_ID` reuses immutable RPC fetch caches, tool corpora, and a persisted frontier. The cache key includes project revision, effective configuration hash, tool versions, `SnapshotSet` fingerprints, target hashes, relay dataset/policy hashes, actor policy hash, and invariant IR hash.
+
+Frontier entries store `ActionTrace`, score, lineage, and budget metadata—not process-local fork handles. Resume reconstructs every branch by canonical replay from the recorded bases. A key or fingerprint mismatch is an invalid configuration and starts no work; users must choose a new run instead of silently mixing state.
 
 ---
 
@@ -165,38 +202,32 @@ Direct embedding of secrets in config files or CLI flags is discouraged. The har
 
 ### Writing Invariants
 
-Cross-chain invariants are standard Foundry test functions annotated with NatSpec tags:
+Cross-chain functions use Foundry syntax as an authoring surface, but Astarots parses the full required IR and generates executable per-chain harnesses:
 
 ```solidity
-/// @crosschain src=ethereum dst=polygon
-/// @observation AFTER_ALL_DELIVERED
-/// @correlation messageHash
-/// @tools echidna, halmos
-/// @severity CRITICAL
+/// @crosschain contexts=ethereum.bridge,polygon.bridge entry=ethereum.bridge
+/// @transition ethereum.bridge:locked increase=["deposit(uint256,address)"] decrease=["burn(uint256,address)","expireMessage(bytes32)"]
+/// @transition polygon.bridge:minted increase=["mint(bytes)"] decrease=["withdraw(uint256,address)"]
+/// @observation AFTER_ALL_DELIVERED quiescence=NO_ELIGIBLE_MESSAGES max_pending_age=ethereum:7200s exclude=expired,rejected
+/// @correlation bridge_message
+/// @bind locked=ethereum.bridge.totalLocked() minted=polygon.bridge.totalMinted()
+/// @quantify FORALL locked,minted: locked == minted
+/// @observe touched,relay max=256
+/// @assume message_ordering: ordered_by_sequence
 function invariant_locked_equals_minted() public {
     assert(bridgeEth.totalLocked() == bridgePoly.totalMinted());
 }
 ```
 
-### Running a Subset of Invariants
+### Running a Subset
 
 ```bash
 astarots probe \
-    --target ethereum=src/BridgeEth.sol \
-    --target polygon=src/BridgePoly.sol \
-    --chains ethereum,polygon \
-    --focus invariant_locked_equals_minted
-```
-
-### Running a Subset of Tools
-
-Slither first (fast, static), findings seed Echidna (slower, dynamic):
-
-```bash
-astarots probe \
-    --target ethereum=src/BridgeEth.sol \
-    --target polygon=src/BridgePoly.sol \
-    --chains ethereum,polygon \
+    --target ethereum.bridge=0xEthBridge \
+    --artifact ethereum.bridge=out/IBridgeEth.sol/IBridgeEth.json \
+    --target polygon.bridge=0xPolyBridge \
+    --artifact polygon.bridge=out/IBridgePoly.sol/IBridgePoly.json \
+    --focus invariant_locked_equals_minted \
     --tools slither,echidna
 ```
 
@@ -210,24 +241,87 @@ For repeated runs, create `astarots.toml`:
 [default]
 invariants = "test/invariants/"
 tools = ["echidna", "halmos", "slither"]
-max_depth = 4
-beam_widths = [4, 3, 2, 1]
+max_depth = 8
+branching_caps = [4, 4, 3, 3, 2, 2, 1, 1]
+max_consecutive_expansions_per_chain = 4
 max_states = 200
 timeout = 600
 
-[targets]
-ethereum = "src/BridgeEth.sol"
-polygon = "src/BridgePoly.sol"
-
 [chains.ethereum]
-rpc_url = "$ETH_RPC_URL"
+rpc_env = "ETH_RPC_URL"
 chain_id = 1
 fork_block = 18500000
+expected_block_hash = "0x..."
+expected_state_root = "0x..."
 
 [chains.polygon]
-rpc_url = "$POLY_RPC_URL"
+rpc_env = "POLY_RPC_URL"
 chain_id = 137
 fork_block = 49800000
+expected_block_hash = "0x..."
+expected_state_root = "0x..."
+
+[targets."ethereum.bridge"]
+address = "0xEthBridge"
+artifact = "out/IBridgeEth.sol/IBridgeEth.json"
+source = "src/BridgeEth.sol"
+role = "source"
+expected_code_hash = "0x..."
+proxy_kind = "uups"
+implementation_address = "0x..."
+expected_implementation_code_hash = "0x..."
+
+[targets."polygon.bridge"]
+address = "0xPolyBridge"
+artifact = "out/IBridgePoly.sol/IBridgePoly.json"
+source = "src/BridgePoly.sol"
+role = "destination"
+expected_code_hash = "0x..."
+proxy_kind = "uups"
+implementation_address = "0x..."
+expected_implementation_code_hash = "0x..."
+
+[correlations.bridge_message]
+source_context = "ethereum.bridge"
+source_event = "Locked(bytes32,address,uint256)"
+source_fields = ["messageHash"]
+destination_context = "polygon.bridge"
+destination_event = "Minted(bytes32,address,uint256)"
+destination_fields = ["messageHash"]
+normalize = "bytes32"
+
+[relay]
+dataset = "artifacts/relay/messages.json"
+mode = "protocol-valid-synthetic"
+protocol_adapter = "example-bridge"
+delay_model = "bounded"
+dataset_hash = "sha256:..."
+adapter_config = "astarots.relay.toml"
+adapter_config_hash = "sha256:..."
+ordering = "fifo_per_emitter"
+duplicate_delivery = "reject"
+reorg_assumption = "no_reorg_after_finality"
+delivery_deadline = { value = 7200, unit = "seconds", chain_id = "ethereum" }
+
+[relay.finality_blocks]
+ethereum = 64
+polygon = 128
+
+[relay.min_delay_seconds]
+ethereum = 0
+polygon = 0
+
+[relay.max_delay_seconds]
+ethereum = 7200
+polygon = 7200
+
+[snapshot]
+max_timestamp_delta = 300
+require_finalized = true
+
+[actors]
+policy = "astarots.actors.toml"
+policy_hash = "sha256:..."
 
 [tools.echidna]
 timeout = 300
@@ -236,54 +330,47 @@ test_limit = 50000
 [tools.halmos]
 timeout = 600
 solver_timeout = 120
-
-[tools.slither]
-detectors = ["reentrancy", "unchecked-transfer", "access-control"]
 ```
 
 ---
 
 ## Output Interpretation
 
-Cross-chain probe output shows per-chain findings with verdict and evidence strength:
+Cross-chain output separates the campaign verdict, full-trace replay strength, and optional per-segment confirmation:
 
 ```
 Cross-Chain Invariant: invariant_locked_equals_minted
 ═══════════════════════════════════════════════════
-Verdict:   violated
-Evidence:  symbolically-confirmed (echidna + halmos, bounds: L=5,T=120)
-Depth:     3 (ethereum) + 2 (polygon) → cross-chain confirmed
-Impact:    CRITICAL — unauthorized mint on destination
+Verdict:           violated
+Violation source: introduced_by_trace
+Aggregate:         replayed
+Global depth:      5 causal actions
+Actor class:       permissionless
+Relay:             protocol-valid-synthetic (policy sha256:...)
+Impact:            CRITICAL — unauthorized mint on destination
 
-Source Chain (ethereum):
-  [setDelegate(attacker), lock(100 ETH), rotateGuardians()]
-  └─ Found by: echidna → halmos (symbolically-confirmed)
+Trace:
+  [ethereum] setDelegate(attacker)
+  [ethereum] lock(100 ETH)
+  [relay]    message 0x...
+  [polygon]  mint(100 ETH)
+  [polygon]  withdraw(100 ETH)
 
-Destination Chain (polygon):
-  [mint(100 ETH), withdraw(100 ETH)]
-  └─ Found by: echidna (observed)
-
-Cross-Chain Correlation:
-  └─ Guardian rotation on ethereum skipped verification on polygon
-  └─ Message signed by 7 old guardians + 6 new guardians = 13 total
-  └─ Neither old set (19) nor new set (19) individually reached quorum
-  └─ But combined count crossed threshold (13)
-
-Constraints:
-  • Guardian rotation must be in-flight (old set not yet expired)
-  • Attacker controls delegate address on source chain
-  • 7 signatures from rotated-out guardians still accepted
+Segment evidence:
+  ethereum: observed by Echidna;
+            symbolically-confirmed-under-projected-state by Halmos
+  polygon:  replayed by canonical executor
 ```
 
-Per-chain traces are labeled with `[chain]` annotations. The cross-chain correlation section shows how findings on two causally coordinated chains combine into a protocol-level vulnerability.
+The trace is one causal branch, not a combination of independent per-chain results. Every relay transition, actor, base fingerprint, bound, and projection manifest is available in JSON.
 
 ---
 
 ## Development Loop
 
-1. **Define chains** — `astarots chain add` for each chain in the protocol.
-2. **Define invariants** — write `.t.sol` files with `@crosschain` annotations and observation policy.
-3. **Quick static scan** — `astarots probe --tools slither` for fast cross-chain pattern detection.
-4. **Shallow fuzz** — `astarots probe --tools echidna --max-depth 2` for dynamic exploration.
-5. **Deep search** — `astarots probe --tools echidna,halmos --max-depth 4` for thorough edge case discovery.
-6. **Replay and fix** — `astarots replay` to verify findings; run `FixedRegression` to confirm the patch.
+1. **Define snapshots and targets** — register pinned chains and deployed contexts.
+2. **Define relay and actor policies** — pin the dataset, authenticity mode, and allowed privileges.
+3. **Define invariants** — author the complete NatSpec IR and human-readable assertion.
+4. **Quick static scan** — use Slither for candidate hints.
+5. **Causal search** — use Echidna candidates with a global depth appropriate to the protocol.
+6. **Confirm and replay** — project selected witnesses into Halmos, replay the full trace, and run the fixed regression against an explicit patched target.

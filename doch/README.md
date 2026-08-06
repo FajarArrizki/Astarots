@@ -1,8 +1,8 @@
 # Astarots — Design Documentation
 
-Cross-chain invariant testing harness — **mainnet fork state archaeology**. Combines Echidna, Halmos, Slither, and other analysis tools under a unified causal beam search. Invariants are checked against forked mainnet state at pinned blocks — the contracts are already deployed, the state has accumulated over years of protocol operation. Edge cases emerge from specific state + specific transaction sequences, not from code-level bugs.
+Cross-chain invariant testing harness for **mainnet-fork state exploration**. It combines Echidna, Halmos, Slither, and a canonical fork executor under one causal search. Invariants are checked against coherent pinned snapshots so the harness can find state-dependent bugs and transaction sequences that code-only analysis or fresh deployments may miss.
 
-**Milestone 1: Cross-chain.** The harness decomposes multi-chain invariants into per-chain sub-probes with developer-declared transition predicates, runs causal beam search across a unified frontier — source-chain steps precede destination-chain steps through an explicit message lifecycle, no Cartesian recombination — and correlates witnesses by correlation value to verify the cross-chain property. Future milestones will extend this to single-chain protocol domains (DEX, lending, staking).
+**Milestone 1: Cross-chain.** Developer-declared transition predicates are explored through a unified causal frontier: source actions, relay transitions, and destination actions remain in one branch-local `GlobalState`, and the invariant is evaluated directly against that state. Protocol-specific message formats live behind adapters; future milestones may extend the same engine to single-chain domains.
 
 ---
 
@@ -11,11 +11,11 @@ Cross-chain invariant testing harness — **mainnet fork state archaeology**. Co
 | Document | Description |
 |---|---|
 | [Architecture](architecture/README.md) | Overall design, chain decomposition, component roles, and data flow |
-| [Algorithm](algorithm/README.md) | Core search algorithm — adaptive beam search, cross-chain state decomposition, ranking, frontier ordering, deduplication |
+| [Algorithm](algorithm/README.md) | Unified causal best-first search, adaptive branching, state ranking, frontier ordering, and deduplication |
 | [Usage](usage/README.md) | CLI commands, chain configuration, cross-chain invariant workflow, and development loop |
 | [Adapter Protocol](adapter/README.md) | Adapter interface contract, per-tool implementation notes (Echidna, Halmos, Slither), and output normalization |
 | [Invariant Specification](invariant/README.md) | Cross-chain invariant patterns in `.t.sol` — quorum, bridge balance, signature verification, message replay, and NatSpec metadata |
-| [Output & Evidence](output/README.md) | Per-chain evidence chain, console output, JSON export, multi-chain replay contracts, and confidence model |
+| [Output & Evidence](output/README.md) | Verdict/evidence taxonomy, reproducible JSON, causal trace annotations, and multi-chain replay contracts |
 
 ---
 

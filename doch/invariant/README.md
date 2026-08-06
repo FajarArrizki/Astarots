@@ -1,48 +1,58 @@
 # Cross-Chain Invariant Specification
 
-Invariants are properties that must hold across a protocol spanning multiple chains, checked against **forked mainnet state** at pinned blocks. The Wormhole protocol has operated for 5+ years — its code is battle-tested, but the accumulated state may harbor edge cases. A cross-chain invariant differs from a single-chain invariant in one critical way: the protocol has in-flight state — messages emitted but not yet delivered across years of activity — where naive equality assertions are invalid. The invariant is evaluated against real mainnet storage, real guardian sets, and real pending message queues.
+Invariants are properties that must hold across a protocol spanning multiple chains, checked against **forked mainnet state** at coherent pinned snapshots. Long-lived protocols contain in-flight messages and accumulated state where naive equality assertions are invalid. On-chain storage is combined with a content-addressed relay dataset; the fork alone is never assumed to contain every pending off-chain attestation.
 
-The harness accepts invariants defined in `.t.sol` using standard Foundry test conventions. A `.t.sol` file declares *what* must hold; the harness' invariant IR (defined below) carries the *when, how, and under what assumptions* the property is checked. The IR is the authoritative representation — the `.t.sol` parser populates it, but a developer may also write the IR directly for properties that cannot be expressed in Solidity assertions alone.
+Invariant files use Solidity and Foundry syntax as a familiar authoring surface, but cross-chain functions are parsed by Astarots rather than executed directly as ordinary single-fork Forge tests. The normalized invariant IR is authoritative and generated per-chain harnesses are what Echidna, Halmos, or Foundry actually execute.
 
 ---
 
 ## Invariant IR (Internal Representation)
 
-Every invariant, whether parsed from `.t.sol` or authored directly, is normalized into this structure before the scheduler sees it:
+Every invariant, whether parsed from `.t.sol` or authored directly, is normalized into this structure before the unified search engine sees it:
 
 ```
 CrossChainInvariant:
     id: str
-    contexts: Map[ChainId, list[Context]]      # may include multiple contracts
-    correlation_key: str                       # event field used to pair events
-    correlation_extractor: CorrelationExtractor # how to extract key from event
-    bindings: list[Binding]                    # variable bindings across chains
+    contexts: Map[ContextId, Context]
+    entry_context: ContextId
+    correlation_extractor_id: str
+    correlation_extractor: CorrelationExtractor
+    bindings: list[Binding]
     observation_policy: ObservationPolicy
+    observation_set: ObservationSet
     assumptions: list[Assumption]
     transition_predicates: list[TransitionPredicate]
-    property: QuantifiedPredicate
+    tool_allowlist: list[str]
+    severity: CRITICAL | HIGH | MEDIUM | LOW
+    timeout_seconds: int
+    property: Property
 ```
 
 ### Context
 
-One chain can have multiple contracts. Each context binds a contract to its role and fork configuration:
+One chain can have multiple contracts. A context ID resolves to exactly one validated `ChainTarget` in the campaign `TargetSet`; deployment and proxy fingerprints are not duplicated inside the invariant:
 
 ```
 Context:
-    chain_id: str                    # "ethereum", "polygon"
-    contract: str                    # contract name for ABI/source resolution
-    address: str                     # mainnet deployed address (0x...)
-    role: str                        # "source", "destination", "relayer", "governance"
-    monitors: list[str]              # state variables or events to observe
-    fork_block: int                  # pinned mainnet block for this chain
-    abi_artifact: str                # path to ABI JSON (from source compilation)
-    proxy: Optional[ProxyInfo]       # if the target is behind a proxy
-
-ProxyInfo:
-    kind: str                        # "transparent" | "uups" | "beacon"
-    implementation_address: str      # implementation address at fork_block
-    implementation_code_hash: str    # hash for integrity verification
+    context_id: ContextId             # e.g. "ethereum.bridge"; TargetSet join key
+    chain_id: ChainId                 # validated against the target binding
+    role: str                         # source, destination, relayer, governance
+    monitors: list[StateReference | EventSelector]
+    snapshot_ref: str                 # chain entry in the campaign SnapshotSet
 ```
+
+```
+StateReference:
+    context_id: ContextId
+    kind: GETTER | STORAGE_PATH
+    getter: Optional[FunctionSelector]
+    storage_path: Optional[str]
+    result_path: Optional[str]         # tuple field or array index
+    arguments: list[str]              # bound variables or earlier binding IDs
+    value_type: str
+```
+
+Exactly one of `getter` or `storage_path` is set. Getter references use canonical signatures; arguments are supplied separately and binding dependencies must be acyclic. NatSpec writes a parameterized getter as `context.function(type,...)[arg,...]`. Storage paths are resolved against the validated storage layout; ambiguous or missing references are invalid configuration.
 
 ### Correlation Extractor
 
@@ -50,13 +60,28 @@ Defines how to extract the correlation value from a cross-chain event. The harne
 
 ```
 CorrelationExtractor:
-    source: EventSelector            # which event on the source chain
-    destination: EventSelector       # which event on the destination chain
-    key_field: str                   # field name shared by both events (e.g. "messageHash")
+    source: EventSelector
+    destination: EventSelector
+    source_fields: list[str]          # may be composite: emitter + sequence
+    destination_fields: list[str]
+    normalize: TransformRef            # adapter-defined canonicalization
 
 EventSelector:
-    contract: str                    # contract name matching a Context
-    event_name: str                  # event signature name
+    context_id: ContextId
+    event_signature: str              # full signature, not only overloaded name
+```
+
+NatSpec names a configured extractor; it does not ask the parser to infer event semantics:
+
+```toml
+[correlations.bridge_message]
+source_context = "ethereum.bridge"
+source_event = "Locked(bytes32,address,uint256)"
+source_fields = ["messageHash"]
+destination_context = "polygon.bridge"
+destination_event = "Minted(bytes32,address,uint256)"
+destination_fields = ["messageHash"]
+normalize = "bytes32"
 ```
 
 ### Binding
@@ -65,64 +90,90 @@ Declares how variables from one chain's state map to variables on another chain.
 
 ```
 Binding:
-    source: str                      # "ethereum.bridgeEth.totalLocked"
-    destination: str                 # "polygon.bridgePoly.totalMinted"
-    relation: EQUALS | SUM | DIFF    # how the values relate after correlation
+    id: str                            # variable name used by Property
+    sources: list[StateReference]
+    reduce: IDENTITY | SUM | DIFF | CUSTOM
+    transform: Optional[TransformRef]  # decimals, fees, or adapter function
 ```
+
+A single-source binding has the structural reduction `IDENTITY`. Multi-source bindings must declare `SUM`, `DIFF`, or a named `CUSTOM` reducer; dependency cycles and implicit numeric conversions are rejected.
 
 ### Transition Predicate
 
-Declares what state transitions are **valid** on a chain. The decomposer uses these to derive sub-invariants — it does not invent deposit/burn/refund rules:
+Declares which calls may change observed state and how. The normalized rule supports scalar, mapping, reset, and adapter-defined effects:
 
 ```
 TransitionPredicate:
-    chain_id: str
-    contract: str
-    state_var: str                   # e.g. "locked"
-    on_increase: list[str]           # functions that may increase this value
-    on_decrease: list[str]           # functions that may decrease this value
-    guard: Optional[str]             # additional condition (e.g. "only after verified burn")
+    context_id: ContextId
+    binding_id: str
+    rules: list[TransitionRule]
+
+TransitionRule:
+    id: str
+    function: FunctionSelector
+    effect: INCREASE | DECREASE | SET | RESET | DELETE | MAPPING_WRITE | CUSTOM
+    guard: Optional[Expression]
+    affected_bindings: list[str]
+    custom_effect: Optional[TransformRef]  # required only for CUSTOM
+
+FunctionSelector:
+    context_id: ContextId
+    function_signature: str          # canonical signature, including parameter types
 ```
 
-For a bridge, a developer would declare:
+For example:
 
 ```
 TransitionPredicate(
-    chain_id="ethereum",
-    contract="bridgeEth",
-    state_var="locked",
-    on_increase=["deposit", "receiveRefund"],
-    on_decrease=["burn", "expireMessage"],
+    context_id="ethereum.bridge",
+    binding_id="locked",
+    rules=[
+        TransitionRule(
+            id="locked.deposit",
+            function=FunctionSelector("ethereum.bridge", "deposit(uint256,address)"),
+            effect=INCREASE,
+            affected_bindings=["locked"],
+        ),
+        TransitionRule(
+            id="locked.burn",
+            function=FunctionSelector("ethereum.bridge", "burn(uint256,address)"),
+            effect=DECREASE,
+            affected_bindings=["locked"],
+        ),
+    ],
 )
 TransitionPredicate(
-    chain_id="polygon",
-    contract="bridgePoly",
-    state_var="minted",
-    on_increase=["mint"],
-    on_decrease=["withdraw"],
-    guard="only for verified lock events with unique messageHash",
+    context_id="polygon.bridge",
+    binding_id="count",
+    rules=[
+        TransitionRule(
+            id="count.execute",
+            function=FunctionSelector("polygon.bridge", "executeMessage(bytes32)"),
+            effect=MAPPING_WRITE,
+            guard=Binary(EQ, Reference("count"), Literal(0)),
+            affected_bindings=["count"],
+        ),
+    ],
 )
 ```
 
-The decomposer uses these to check that a candidate's state change is valid under the declared transitions, then probes whether an invalid transition is reachable.
+The NatSpec `increase=[...]` and `decrease=[...]` forms are compact syntax for `TransitionRule` entries. Other effects use `effect=SET|RESET|DELETE|MAPPING_WRITE|CUSTOM` with an explicit function list and guard. The decomposer only validates and materializes these declarations.
 
-### ObservationPolicy
+### Observation Policy
 
-Determines **when** the invariant is checked.
-
-**Scope note:** The harness performs **fork-state invariant testing** — checking invariants against a specific mainnet snapshot at a pinned block. This is not full historical archaeology (which would require multiple representative blocks across upgrade epochs, guardia rotations, and incident windows). A Snapshot Discovery phase (selecting blocks before/after key protocol transitions and clustering by state fingerprint) is deferred to a future milestone. The initial implementation tests one `SnapshotSet` per campaign.
-
-### ObservationPolicy
-
-Determines **when** the invariant is checked:
+Determines **when** the invariant is checked. The initial milestone performs fork-state invariant testing against one coherent `SnapshotSet` per campaign; multi-epoch snapshot discovery remains a later milestone.
 
 ```
 ObservationPolicy:
     kind: PER_TRANSACTION | AFTER_FINALITY | AFTER_ALL_DELIVERED | BLOCK_BOUNDED
-    deadline: Optional[int]          # blocks or seconds, for BLOCK_BOUNDED
-    deadline_unit: Optional[str]     # "blocks" | "seconds"
+    deadline: Optional[Deadline]     # required for BLOCK_BOUNDED
     finality_blocks: Optional[int]   # confirmations required, for AFTER_FINALITY
     quiescence: Optional[QuiescenceRule]  # when is "all delivered" satisfied?
+
+Deadline:
+    value: int
+    unit: BLOCKS | SECONDS
+    chain_id: Optional[ChainId]      # required when chain clocks may diverge
 ```
 
 ### QuiescenceRule
@@ -132,7 +183,7 @@ Defines when the system is considered quiescent for `AFTER_ALL_DELIVERED`:
 ```
 QuiescenceRule:
     kind: NO_PENDING_MESSAGES | NO_ELIGIBLE_MESSAGES | BOUNDED_BY_BLOCK
-    max_pending_age: Optional[int]   # blocks or seconds
+    max_pending_age: Optional[Deadline]
     exclude_expired: bool            # ignore expired messages
     exclude_rejected: bool           # ignore rejected messages
 ```
@@ -141,29 +192,74 @@ QuiescenceRule:
 
 ```
 Assumption:
-    kind: GUARDIAN_HONESTY | MESSAGE_ORDERING | REORG_DEPTH | LIVENESS | ...
+    kind: SIGNER_HONESTY | MESSAGE_ORDERING | FINALITY_MODEL | LIVENESS | PROTOCOL_SPECIFIC
     value: Any                       # e.g. "at_most_N_malicious: 6"
 ```
 
-### QuantifiedPredicate
+### Property
 
-The property itself, with explicit quantification over the variables bound across chains:
+Safety and bounded liveness are distinct:
 
 ```
+Property:
+    kind: SAFETY | EVENTUALLY
+    predicate: QuantifiedPredicate
+    trigger: Optional[Expression]      # required for EVENTUALLY
+    deadline: Optional[Deadline]     # required for EVENTUALLY
+
 QuantifiedPredicate:
     kind: FORALL | EXISTS | FORALL_EXISTS
-    bound_variables: list[str]       # variables from bindings
-    predicate: str                   # assertion expression
-
-ObservationSet:
-    touched_message_ids: list[str]      # messages involved in the current probe
-    relay_dataset_ids: list[str]        # relay data records used
-    sampled_historical_ids: list[str]   # historical messages sampled (not full scan)
-    probe_generated_ids: list[str]      # messages generated during probing
-    max_items: int                      # upper bound for iteration (prevents OOG on mainnet)
+    bound_variables: list[str]
+    predicate: Expression
 ```
 
-Mainnet invariants cannot iterate over the full 5-year history. `executedMessageCount()` scanning from index 0 on a long-lived contract is prohibitively expensive or out-of-gas. The `ObservationSet` bounds evaluation to messages that are part of the current campaign or witness — full linear scans of on-chain history are never performed in invariant functions.
+```
+Expression:
+    type: str
+    node: Literal | Reference | Unary | Binary | AdapterCall
+
+Literal:
+    value: Any
+
+Reference:
+    name: str                          # binding ID, quantified variable, or call argument
+
+Unary:
+    op: NOT | NEGATE
+    operand: Expression
+
+Binary:
+    op: EQ | NE | LT | LE | GT | GE | AND | OR | ADD | SUB | MUL | DIV | MOD
+    left: Expression
+    right: Expression
+
+AdapterCall:
+    function: TransformRef
+    arguments: list[Expression]
+
+TransformRef:
+    function: str
+    version: str
+```
+
+NatSpec expressions are parsed and type-checked into this AST before search. Arithmetic uses Solidity-compatible checked integer semantics for the declared type. Calls are forbidden except versioned, pure adapter functions declared in the effective configuration; unknown names, coercions, and side effects are hard errors.
+
+An `EVENTUALLY` property starts its deadline only when the declared trigger becomes true. Exhausting the deadline without a conclusive observation is a violation; a timeout or missing relay data is `inconclusive`, not a liveness failure.
+
+### Observation Set
+
+Bounds which historical and probe-generated messages may be inspected:
+
+```
+ObservationSet:
+    touched_message_ids: list[str]
+    relay_dataset_ids: list[str]
+    sampled_historical_ids: list[str]
+    probe_generated_ids: list[str]
+    max_items: int
+```
+
+Mainnet invariants cannot iterate over an unbounded protocol history. Evaluation is restricted to the declared observation set; full linear scans of long-lived on-chain history are never generated.
 
 Examples:
 
@@ -181,6 +277,18 @@ QuantifiedPredicate(
     bound_variables=["messageHash"],
     predicate="consumption_count[messageHash] <= 1",
 )
+
+# Bounded liveness: every finalized source message is eventually consumed
+Property(
+    kind=EVENTUALLY,
+    trigger="message_status[messageHash] == SourceFinalized",
+    deadline=Deadline(value=128, unit=BLOCKS, chain_id="polygon"),
+    predicate=QuantifiedPredicate(
+        kind=FORALL,
+        bound_variables=["messageHash"],
+        predicate="consumption_count[messageHash] == 1",
+    ),
+)
 ```
 
 ---
@@ -192,8 +300,8 @@ QuantifiedPredicate(
 pragma solidity ^0.8.0;
 
 import {Test} from "forge-std/Test.sol";
-import {IBridgeEth} from "../src/interfaces/IBridgeEth.sol";
-import {IBridgePoly} from "../src/interfaces/IBridgePoly.sol";
+import {IBridgeEth} from "../../src/interfaces/IBridgeEth.sol";
+import {IBridgePoly} from "../../src/interfaces/IBridgePoly.sol";
 
 contract BridgeInvariants is Test {
     // Mainnet-fork mode: cast to existing deployed addresses.
@@ -211,14 +319,18 @@ contract BridgeInvariants is Test {
         bridgePoly = IBridgePoly(POLY_BRIDGE_ADDRESS);
     }
 
-    /// @crosschain src=ethereum dst=polygon
-    /// @observation AFTER_ALL_DELIVERED
-    /// @transition ethereum:locked increase=deposit,receiveRefund decrease=burn,expireMessage
-    /// @transition polygon:minted increase=mint decrease=withdraw
-    /// @correlation messageHash
-    /// @bind locked=ethereum.bridgeEth.totalLocked minted=polygon.bridgePoly.totalMinted
+    /// @crosschain contexts=ethereum.bridge,polygon.bridge entry=ethereum.bridge
+    /// @observation AFTER_ALL_DELIVERED quiescence=NO_ELIGIBLE_MESSAGES max_pending_age=ethereum:7200s exclude=expired,rejected
+    /// @transition ethereum.bridge:locked increase=["deposit(uint256,address)","receiveRefund(bytes32)"] decrease=["burn(uint256,address)","expireMessage(bytes32)"]
+    /// @transition polygon.bridge:minted increase=["mint(bytes)"] decrease=["withdraw(uint256,address)"]
+    /// @correlation bridge_message
+    /// @bind locked=ethereum.bridge.totalLocked() minted=polygon.bridge.totalMinted()
     /// @quantify FORALL locked,minted: locked == minted
-    /// @assume guardian_honesty: at_most_6_malicious
+    /// @observe touched,relay max=256
+    /// @assume signer_honesty: at_most_6_malicious
+    /// @tools echidna,halmos,slither
+    /// @severity CRITICAL
+    /// @timeout 600
     function invariant_locked_equals_minted_after_delivery() public {
         uint ethLocked = bridgeEth.totalLocked();
         uint polyMinted = bridgePoly.totalMinted();
@@ -227,18 +339,13 @@ contract BridgeInvariants is Test {
 }
 ```
 
-The NatSpec tags declare the full IR. The Solidity `assert` is a human-readable rendering — the authoritative representation is the IR derived from the NatSpec tags.
+The NatSpec tags declare the full IR. The Solidity `assert` is a checked, human-readable rendering of the supported predicate subset. Astarots parses this function, generates one executable harness per chain, and evaluates the cross-chain predicate against `GlobalState`; the function is not executed directly while two forks are simultaneously active. Address constants are injected from the validated target configuration.
 
 ---
 
 ## Transition Predicates vs Decomposer
 
-The decomposer does **not** invent rules about which functions change which state. It reads `TransitionPredicate` from the IR. For each `on_increase` and `on_decrease` target:
-
-- The sub-invariant for that chain asserts that the state variable only changes through a declared function.
-- If a probe finds a path where the state variable changes through an undeclared function, that is a violation of the transition predicate — and therefore of the local sub-invariant.
-
-This is verifiable: the decomposer generates assertions that tools can check. No semantic invention is required.
+The decomposer does **not** infer which functions may mutate state. For each declared `TransitionRule`, it generates a local monitor over the before/after value, canonical function selector, effect, guard, and affected bindings. A mutation outside those rules violates the local monitor; adapter-defined `CUSTOM` effects require an executable adapter predicate.
 
 ---
 
@@ -247,30 +354,33 @@ This is verifiable: the decomposer generates assertions that tools can check. No
 ### Balance Conservation
 
 ```solidity
-/// @transition ethereum:locked increase=deposit,receiveRefund decrease=burn,expireMessage
-/// @transition polygon:minted increase=mint decrease=withdraw
-/// @correlation messageHash
-/// @bind locked=ethereum.bridgeEth.totalLocked minted=polygon.bridgePoly.totalMinted
+/// @transition ethereum.bridge:locked increase=["deposit(uint256,address)","receiveRefund(bytes32)"] decrease=["burn(uint256,address)","expireMessage(bytes32)"]
+/// @transition polygon.bridge:minted increase=["mint(bytes)"] decrease=["withdraw(uint256,address)"]
+/// @correlation bridge_message
+/// @bind locked=ethereum.bridge.totalLocked() minted=polygon.bridge.totalMinted()
 /// @quantify FORALL locked,minted: locked == minted
-/// @observation AFTER_ALL_DELIVERED
+/// @observation AFTER_ALL_DELIVERED quiescence=NO_ELIGIBLE_MESSAGES max_pending_age=ethereum:7200s exclude=expired,rejected
 ```
 
 ### Quorum Threshold
 
 ```solidity
-/// @transition ethereum:verifiedSignatures increase=submitMessage decrease=executeMessage
-/// @correlation messageHash
-/// @bind sigCount=ethereum.bridgeEth.verifiedSignatureCount(msgHash,currentSet)
-/// @quantify FORALL msgHash: sigCount >= THRESHOLD
+/// @transition ethereum.bridge:executed effect=MAPPING_WRITE functions=["executeMessage(bytes32)"] guard="signerCount >= required && !executed"
+/// @correlation bridge_message
+/// @bind epoch=ethereum.bridge.verifierEpoch(bytes32)[messageHash] executed=ethereum.bridge.executed(bytes32)[messageHash] signerCount=ethereum.bridge.signerCount(bytes32,uint32)[messageHash,epoch] required=ethereum.bridge.requiredThreshold(uint32)[epoch]
+/// @quantify FORALL messageHash: !executed || signerCount >= required
+/// @observe touched,relay max=256
 /// @observation PER_TRANSACTION
 ```
 
 ### Message Replay Protection
 
 ```solidity
-/// @correlation messageHash
-/// @bind count=polygon.bridgePoly.consumptionCount(messageHash)
+/// @transition polygon.bridge:count effect=MAPPING_WRITE functions=["executeMessage(bytes32)"] guard="count == 0"
+/// @correlation bridge_message
+/// @bind count=polygon.bridge.consumptionCount(bytes32)[messageHash]
 /// @quantify FORALL messageHash: count <= 1
+/// @observe touched,relay max=256
 /// @observation PER_TRANSACTION
 ```
 
@@ -280,18 +390,20 @@ This is verifiable: the decomposer generates assertions that tools can check. No
 
 | Tag | Example | Effect |
 |---|---|---|
-| `@crosschain src=X dst=Y` | `src=ethereum dst=polygon` | Mark as cross-chain, specify chains |
-| `@transition` | `chain:var increase=f1,f2 decrease=f3` | Valid state transitions (repeatable) |
-| `@observation POLICY` | `AFTER_ALL_DELIVERED` | When the invariant is checked |
-| `@correlation KEY` | `messageHash` | How to pair events across chains |
-| `@bind` | `locked=eth.totalLocked minted=poly.totalMinted` | Variable bindings across chains |
+| `@crosschain` | `contexts=ethereum.bridge,polygon.bridge entry=ethereum.bridge` | Bind target contexts and initial execution context |
+| `@transition` | `context:state increase=["f(uint256)"]` or `effect=MAPPING_WRITE ...` | Canonical selectors normalized to `TransitionRule` |
+| `@observation POLICY` | `AFTER_ALL_DELIVERED quiescence=NO_ELIGIBLE_MESSAGES max_pending_age=ethereum:7200s exclude=expired,rejected` | Evaluation point and temporal/quiescence parameters |
+| `@correlation NAME` | `bridge_message` | Select a configured `CorrelationExtractor` |
+| `@bind` | `locked=ethereum.bridge.totalLocked() minted=polygon.bridge.totalMinted()` | Canonical getter or storage-path bindings across contexts |
 | `@quantify` | `FORALL locked,minted: locked == minted` | Quantification and predicate |
-| `@assume KIND: VALUE` | `guardian_honesty: at_most_6_malicious` | Scope assumption |
+| `@eventually` | `trigger="..." deadline=polygon:128blocks predicate="..."` | Bounded-liveness property; mutually exclusive with `@quantify` |
+| `@observe` | `touched,relay max=256` | Bounded observation-set sources and maximum items |
+| `@assume KIND: VALUE` | `signer_honesty: at_most_6_malicious` | Scope assumption |
 | `@tools` | `echidna, halmos` | Restrict tools |
 | `@severity` | `CRITICAL` | Impact label |
 | `@timeout` | `600` | Per-invariant timeout seconds |
 
-Tags that cannot be expressed in Solidity (`@transition`, `@observation`, `@correlation`, `@bind`, `@quantify`, `@assume`) must be provided via NatSpec. The `.t.sol` parser validates that these are present for cross-chain invariants. Missing metadata is a hard error.
+The parser never infers NatSpec semantics from the assertion body. `@crosschain`, transition rules, observation policy, correlation extractor, bindings, one property tag (`@quantify` or `@eventually`), and a bounded `@observe` set are required unless supplied by explicit IR. Assumptions are optional; tools, severity, and timeout may use validated campaign defaults.
 
 
 ---

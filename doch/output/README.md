@@ -20,11 +20,12 @@ The harness does not use absolute labels like SAFE, PASSED, or PROVEN. Every fin
 
 | Strength | Criteria |
 |---|---|
-| **observed** | A single tool produced a counterexample |
-| **replayed** | The counterexample was independently replayed and reproduced |
-| **symbolically-confirmed** | A second tool with symbolic capabilities confirmed the path under explicit bounds and assumptions |
+| **observed** | One tool produced a counterexample |
+| **replayed** | The full causal trace reproduced in the canonical executor |
+| **symbolically-confirmed** | A symbolic tool confirmed against an equivalent full-state backend |
+| **symbolically-confirmed-under-projected-state** | Halmos confirmed against a declared code/storage projection |
 
-Every `symbolically-confirmed` finding must report the bounds under which confirmation was obtained (loop unrolling depth, solver timeout, address count, assumptions).
+Strength is recorded per trace segment. `aggregate_strength` is the strongest level satisfied by the **entire** causal trace; one projected segment never upgrades unrelated segments. Every symbolic result reports bounds, assumptions, base fingerprints, and any projection manifest.
 
 ---
 
@@ -32,16 +33,20 @@ Every `symbolically-confirmed` finding must report the bounds under which confir
 
 ```
 CrossChainEdgeCase
-├── finding_id:         stable identifier for this finding
-├── invariant:          which cross-chain invariant was violated
-├── verdict:            violated | not-observed | inconclusive
-├── evidence_strength:  observed | replayed | symbolically-confirmed
-├── bounds:             depth, loop unrolling, solver timeout, assumptions
-├── chains:             [ethereum, polygon]
-├── per_chain:          ... (per-chain evidence as below)
-├── correlation:        how the two chains' findings connect
-├── artifact:           path to saved JSON for replay
-└── metadata:           run_id, commit, tool versions, config hash, seed
+├── finding_id
+├── invariant
+├── verdict: violated | not-observed | inconclusive
+├── violation_source: pre_existing_at_snapshot | introduced_by_trace | amplified_by_trace
+├── violated_clauses: local monitor rule IDs and/or global_property
+├── aggregate_strength
+├── segment_strengths: Map[TraceSegmentId, EvidenceStrength]
+├── snapshot_set + base_fingerprints
+├── relay: dataset_hash + mode + message_ids
+├── actor_classification + actor_policy_hash
+├── bounds + assumptions
+├── action_trace
+├── raw_artifacts
+└── metadata: run_id, revision, tool versions, effective config hash
 ```
 
 ---
@@ -53,145 +58,191 @@ Every output artifact includes a metadata block sufficient for independent repro
 ```json
 {
   "schema_version": "1.0.0",
-  "mode": "mainnet-fork",  # invariants checked against forked state, not fresh deploy
+  "mode": "mainnet-fork",
   "run_id": "run_2026-08-06_a3f2c1",
   "finding_id": "bridge-edge-0012",
   "project": {
-    "name": "astarots",
-    "commit": "077d0e8",
-    "branch": "main"
+    "revision": "077d0e8",
+    "effective_config_hash": "sha256:abc123",
+    "invariant_ir_hash": "sha256:invariant-ir"
   },
   "tools": {
     "echidna": "2.1.0",
     "halmos": "0.2.2",
-    "slither": "0.11.0"
+    "slither": "0.11.0",
+    "canonical_executor": "revm-1.0"
   },
-  "config": {
-    "hash": "sha256:abc123...",
-    "beam_widths": [4, 3, 2, 1],
-    "max_depth": 4,
-    "max_states": 200,
-    "timeout": 600
+  "runtime": {
+    "astarots": "0.1.0",
+    "solc": "0.8.30",
+    "foundry": "1.3.1",
+    "platform": "darwin-x86_64"
   },
-  "chains": {
-    "ethereum": {
-      "chain_id": 1,
-      "fork_block": 18500000,
-      "rpc_hash": "sha256:def456..."
-    },
-    "polygon": {
-      "chain_id": 137,
-      "fork_block": 49800000,
-      "rpc_hash": "sha256:ghi789..."
+  "snapshot_set": {
+    "id": "snapshot-set-0042",
+    "coherence_checks_hash": "sha256:coherence",
+    "chains": {
+      "ethereum": {
+        "chain_id": 1,
+        "fork_block": 18500000,
+        "block_hash": "0x...",
+        "state_root": "0x...",
+        "fork_cache_hash": "sha256:...",
+        "targets": {
+          "bridge": {
+            "address": "0x...",
+            "code_hash": "0x...",
+            "proxy_kind": "uups",
+            "implementation": "0x...",
+            "implementation_code_hash": "0x...",
+            "artifact_hash": "sha256:..."
+          }
+        }
+      },
+      "polygon": {
+        "chain_id": 137,
+        "fork_block": 49800000,
+        "block_hash": "0x...",
+        "state_root": "0x...",
+        "fork_cache_hash": "sha256:...",
+        "targets": {
+          "bridge": {
+            "address": "0x...",
+            "code_hash": "0x...",
+            "proxy_kind": "uups",
+            "implementation": "0x...",
+            "implementation_code_hash": "0x...",
+            "artifact_hash": "sha256:..."
+          }
+        }
+      }
     }
   },
+  "relay": {
+    "mode": "protocol-valid-synthetic",
+    "dataset_hash": "sha256:relay",
+    "policy_hash": "sha256:relay-policy",
+    "adapter_config_hash": "sha256:relay-adapter",
+    "message_ids": ["0x..."]
+  },
+  "actor_policy_hash": "sha256:actors",
   "execution": {
     "echidna_seed": 42,
-    "command": "astarots probe --target ... --chains eth,poly",
-    "env_hash": "sha256:jkl012..."
-  },
-  "assumptions": {
-    "guardian_honesty": "at_most_6_malicious",
-    "message_ordering": "ordered_by_sequence"
+    "action_trace_hash": "sha256:trace",
+    "environment_hash": "sha256:environment"
   },
   "search": {
+    "global_depth": 5,
     "budget_used": 143,
     "budget_total": 200,
-    "timeout_occurred": false,
-    "tool_errors": [],
-    "unsupported_paths": 3,
-    "skipped": 0
+    "incomplete_outcomes": [],
+    "unsupported_paths": 3
   }
 }
 ```
 
-Raw tool output is preserved in `Evidence.raw` for each chain, with file hashes for integrity verification.
+Raw tool output is preserved by hash after RPC URLs, tokens, and configured secret values are redacted; redaction metadata is recorded with each artifact.
 
 ---
 
 ## JSON Output
 
 ```bash
-astarots probe --target ethereum=src/BridgeEth.sol --target polygon=src/BridgePoly.sol --output json
+astarots probe \
+  --target ethereum.bridge=0xEthBridge \
+  --artifact ethereum.bridge=out/IBridgeEth.sol/IBridgeEth.json \
+  --target polygon.bridge=0xPolyBridge \
+  --artifact polygon.bridge=out/IBridgePoly.sol/IBridgePoly.json \
+  --output json
 ```
 
 ```json
 {
   "schema_version": "1.0.0",
-  "mode": "mainnet-fork",  # invariants checked against forked state, not fresh deploy
+  "mode": "mainnet-fork",
   "run_id": "run_2026-08-06_a3f2c1",
-  "metadata": { "...": "..." },
-  "invariants": [
+  "metadata": {"snapshot_set_id": "snapshot-set-0042"},
+  "findings": [
     {
-      "name": "invariant_valid_quorum_required",
+      "finding_id": "bridge-edge-0012",
+      "invariant": "invariant_valid_quorum_required",
       "verdict": "violated",
-      "evidence_strength": "symbolically-confirmed",
+      "violation_source": "introduced_by_trace",
+      "violated_clauses": ["global_property"],
+      "aggregate_strength": "replayed",
+      "segment_strengths": {
+        "ethereum:0-2": "symbolically-confirmed-under-projected-state",
+        "polygon:3-4": "replayed"
+      },
       "bounds": {
-        "depth": {"ethereum": 3, "polygon": 2},
-        "halmos": {"loop_unroll": 5, "solver_timeout": 120, "address_count": 4}
+        "global_depth": 5,
+        "halmos": {
+          "loop_unroll": 5,
+          "solver_timeout": 120,
+          "address_count": 4
+        }
       },
       "impact": "CRITICAL",
-      "chains": ["ethereum", "polygon"],
-      "per_chain": {
+      "actor_classification": "permissionless",
+      "action_trace": [
+        {"chain": "ethereum", "call": "signerSetRotation()"},
+        {"chain": "ethereum", "call": "submitMessage(bytes)"},
+        {"kind": "relay", "message_id": "0x..."},
+        {"chain": "polygon", "call": "receiveMessage(bytes)"},
+        {"chain": "polygon", "call": "executeAction()"}
+      ],
+      "evidence": {
         "ethereum": {
-          "sequence": [
-            {"call": "guardianRotation()", "source": "slither→echidna"},
-            {"call": "submitMessage(bytes)", "source": "echidna"},
-            {"call": "verifySignatures(uint256)", "args": [13], "source": "echidna→halmos"}
-          ],
-          "constraints": [
-            {"kind": "STATE_VAR", "target": "guardianSet", "value": "rotation_pending"},
-            {"kind": "CROSS_CHAIN", "target": "signature_count", "value": 13}
-          ],
-          "evidence": {
-            "primary": {
-              "tool": "echidna",
-              "outcome": "Counterexample",
-              "raw_hash": "sha256:abc..."
-            },
-            "confirmation": {
-              "tool": "halmos",
-              "outcome": "Counterexample",
-              "raw_hash": "sha256:def..."
-            }
+          "primary": {
+            "tool": "echidna",
+            "outcome": "Counterexample",
+            "raw_hash": "sha256:abc"
+          },
+          "confirmation": {
+            "tool": "halmos",
+            "outcome": "Counterexample",
+            "strength": "symbolically-confirmed-under-projected-state",
+            "projection_manifest_hash": "sha256:projection",
+            "raw_hash": "sha256:def"
           }
         },
         "polygon": {
-          "sequence": [
-            {"call": "receiveMessage(bytes)", "source": "echidna"},
-            {"call": "executeAction()", "source": "echidna"}
-          ],
-          "constraints": [
-            {"kind": "ACCESS", "target": "verifySignatures", "value": "no_per_set_check"}
-          ],
-          "evidence": {
-            "primary": {
-              "tool": "echidna",
-              "outcome": "Counterexample",
-              "raw_hash": "sha256:ghi..."
-            }
-          }
+          "primary": {
+            "tool": "echidna",
+            "outcome": "Counterexample",
+            "raw_hash": "sha256:ghi"
+          },
+          "canonical_replay_hash": "sha256:polygon-replay"
         }
       },
-      "correlation": {
-        "type": "mixed_guardian_quorum",
-        "old_guardian_sigs": 7,
-        "new_guardian_sigs": 6,
-        "threshold": 13,
-        "violation": "per-set quorum not enforced on destination chain"
+      "relay": {
+        "mode": "protocol-valid-synthetic",
+        "dataset_hash": "sha256:relay",
+        "policy_hash": "sha256:relay-policy",
+        "adapter_config_hash": "sha256:relay-adapter",
+        "message_ids": ["0x..."]
       },
-      "artifact": "artifacts/bridge-edge-0012.json",
-      "raw": {
-        "ethereum": "artifacts/raw/run_a3f2c1_eth_echidna.json",
-        "polygon": "artifacts/raw/run_a3f2c1_poly_echidna.json"
-      }
+      "artifact": "artifacts/bridge-edge-0012.json"
+    }
+  ],
+  "invariant_results": [
+    {
+      "name": "invariant_valid_quorum_required",
+      "verdict": "violated",
+      "finding_ids": ["bridge-edge-0012"]
+    },
+    {
+      "name": "invariant_message_expiry",
+      "verdict": "not-observed",
+      "finding_ids": []
     }
   ],
   "summary": {
-    "total": 4,
-    "violated": 2,
-    "not_observed": 1,
-    "inconclusive": 1
+    "invariants_total": 2,
+    "findings_total": 1,
+    "invariants_violated": 1,
+    "invariants_not_observed": 1,
+    "invariants_inconclusive": 0
   }
 }
 ```
@@ -204,71 +255,73 @@ The harness generates two replay artifacts per edge case: one that reproduces th
 
 ### Backend: Deterministic Twin-State
 
-Replay uses **deterministic twin-state execution**, not `vm.mockCall`. Two approaches are supported:
+Replay creates fresh forks from the recorded `BaseForkFingerprint` values and replays the exact `ActionTrace` plus environment transitions. Before execution it validates block hashes, state roots, deployed code hashes, proxy implementations, relay dataset hash, and actor policy hash.
 
-**Approach A: Foundry multi-fork** — `vm.createFork` / `vm.selectFork` with pinned block numbers. Each chain gets its own fork. The harness generates explicit relay transitions that read state from one fork and apply it to the other.
-
-**Approach B: Twin-state database** — Two separate EVM state databases managed by the harness. Messages are serialized as explicit state transitions between databases. This is the default for fully local execution; multi-fork is used when RPC-backed state is needed.
+Foundry multi-fork is the generated Solidity backend; a twin-state database may be used internally by the canonical executor. Neither backend forks an in-memory mutated fork or uses `vm.mockCall` as a substitute for another chain.
 
 *Reference: [Foundry fork testing](https://getfoundry.sh/forge/fork-testing)*
 
 ### VulnerableReproducer.t.sol
 
-Must demonstrate the violation. Does **not** use `vm.expectRevert()` — the violation is expected to succeed. The test is a positive demonstration that the exploit works under the given constraints. If the exploit succeeds, the invariant is violated and the test passes (confirming the vulnerability):
+Must demonstrate the specific violation without `vm.expectRevert()`. Generated helpers bind deployed interfaces, validate the recorded base fingerprints, and replay one declared relay transition:
 
 ```solidity
 // artifacts/replay/VulnerableReproducer_Bridge_0012.t.sol
-// Finding: invariant_valid_quorum_required
-// Verdict: violated | Evidence: symbolically-confirmed
-
 contract VulnerableReproducer_Bridge_0012 is Test {
     uint256 ethFork;
     uint256 polyFork;
+    IBridgeEth bridgeEth = IBridgeEth(ETH_BRIDGE_ADDRESS);
+    IBridgePoly bridgePoly = IBridgePoly(POLY_BRIDGE_ADDRESS);
 
     function setUp() public {
-        ethFork = vm.createFork("eth", 18500000);
-        polyFork = vm.createFork("poly", 49800000);
+        ethFork = vm.createFork(vm.envString("ETH_RPC_URL"), ETH_BLOCK);
+        polyFork = vm.createFork(vm.envString("POLY_RPC_URL"), POLY_BLOCK);
+        assertBaseFingerprint(ethFork, ETH_FINGERPRINT);
+        assertBaseFingerprint(polyFork, POLY_FINGERPRINT);
     }
 
     function test_reproduce_violation() public {
-        // ETHEREUM: initiate rotation + submit mixed-signature message
         vm.selectFork(ethFork);
-        bridgeEth.initiateGuardianRotation(newGuardians);
-        bridgeEth.submitMessage(message, mixedSignatures);
+        replaySourceSteps(ACTION_TRACE_ID);
 
-        // RELAY TRANSITION: commit ethereum state, deliver to polygon
-        bytes memory relayPayload = captureAndRelay();
+        bytes memory relayPayload = loadRelayMessage(
+            RELAY_DATASET_HASH,
+            MESSAGE_ID,
+            RelayMode.HistoricalAuthentic
+        );
 
-        // POLYGON: receive and execute — should fail but succeeds
         vm.selectFork(polyFork);
+        uint256 beforeCount = bridgePoly.consumptionCount(MESSAGE_ID);
         bridgePoly.receiveMessage(relayPayload);
-        // This call should revert (per-set quorum not met), but doesn't.
-        // We EXPECT it to succeed to demonstrate the vulnerability.
-        bridgePoly.executeAction(message);
-        // If we get here, the exploit succeeded — invariant is violated.
-        assert(bridgePoly.executedMessageCount() > 0);
+        bridgePoly.executeAction(MESSAGE_ID);
+
+        assertEq(bridgePoly.consumptionCount(MESSAGE_ID), beforeCount + 1);
+        assertTrue(invariantViolatedFor(MESSAGE_ID));
     }
 }
 ```
 
 ### FixedRegression.t.sol
 
-Must pass after the fix is applied. Uses `vm.expectRevert()` to confirm the fix blocks the exploit:
+The fixed regression uses the same fingerprints, actor policy, relay record, and action trace, but requires an explicit patched target. The generator either installs a supplied implementation on the local fork or binds a user-provided fixed deployment; it never assumes mainnet changed:
 
 ```solidity
-// artifacts/replay/FixedRegression_Bridge_0012.t.sol
-
-contract FixedRegression_Bridge_0012 is Test {
-    // ... same setup ...
+contract FixedRegression_Bridge_0012 is VulnerableReproducer_Bridge_0012 {
+    function setUp() public override {
+        super.setUp();
+        installPatchedImplementation(
+            polyFork,
+            FIXED_IMPLEMENTATION,
+            FIXED_IMPLEMENTATION_CODE_HASH
+        );
+    }
 
     function test_fix_blocks_exploit() public {
-        // ... same setup steps ...
-
-        // After fix: executeAction should REVERT (quorum not met per-set)
+        bytes memory relayPayload = replaySourceAndLoadRelay(ACTION_TRACE_ID);
         vm.selectFork(polyFork);
         bridgePoly.receiveMessage(relayPayload);
-        vm.expectRevert();  // fix blocks the exploit
-        bridgePoly.executeAction(message);
+        vm.expectRevert();
+        bridgePoly.executeAction(MESSAGE_ID);
     }
 }
 ```
@@ -285,8 +338,8 @@ Console output uses verdict + evidence strength labels:
 │  invariant_valid_quorum_required                                        │
 │  ═══════════════════════════════                                        │
 │  Verdict:   violated                                                    │
-│  Evidence:  symbolically-confirmed (echidna + halmos, bounds: L=5,T=120)│
-│  Impact:    CRITICAL                                                    │
+│  Aggregate: replayed (canonical full-trace replay)                      │
+│  Segment:   ethereum symbolically-confirmed-under-projected-state       │
 │  ...                                                                     │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
