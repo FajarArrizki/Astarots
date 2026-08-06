@@ -261,3 +261,12 @@ This is verifiable: the decomposer generates assertions that tools can check. No
 | `@timeout` | `600` | Per-invariant timeout seconds |
 
 Tags that cannot be expressed in Solidity (`@transition`, `@observation`, `@correlation`, `@bind`, `@quantify`, `@assume`) must be provided via NatSpec. The `.t.sol` parser validates that these are present for cross-chain invariants. Missing metadata is a hard error.
+
+
+---
+
+## References
+
+- [Halmos](https://github.com/a16z/halmos) — symbolic execution engine used for bounded formal verification
+- [Echidna](https://github.com/crytic/echidna) — fuzzer used for concrete sequence exploration
+- [Foundry](https://getfoundry.sh/) — Solidity development framework; invariant files follow Foundry test conventions

@@ -2,7 +2,7 @@
 
 Cross-chain invariant testing harness. Combines Echidna, Halmos, Slither, and other analysis tools under a unified beam search to discover deep edge cases in cross-chain protocols — bridges, message relays, and multi-chain applications — that no single tool can find alone.
 
-**Milestone 1: Cross-chain.** The harness decomposes multi-chain invariants into per-chain sub-probes, runs guided search on each chain independently, then recombines results to verify the cross-chain property. Future milestones will extend this to single-chain protocol domains (DEX, lending, staking).
+**Milestone 1: Cross-chain.** The harness decomposes multi-chain invariants into per-chain sub-probes with developer-declared transition predicates, runs causal beam search across a unified frontier — source-chain steps precede destination-chain steps through an explicit message lifecycle, no Cartesian recombination — and correlates witnesses by correlation value to verify the cross-chain property. Future milestones will extend this to single-chain protocol domains (DEX, lending, staking).
 
 ---
 

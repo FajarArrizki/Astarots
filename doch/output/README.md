@@ -212,7 +212,7 @@ Replay uses **deterministic twin-state execution**, not `vm.mockCall`. Two appro
 
 ### VulnerableReproducer.t.sol
 
-Must demonstrate the violation. Uses `vm.expectRevert()` around the point where the invariant should hold — meaning the violation is expected to succeed:
+Must demonstrate the violation. Does **not** use `vm.expectRevert()` — the violation is expected to succeed. The test is a positive demonstration that the exploit works under the given constraints. If the exploit succeeds, the invariant is violated and the test passes (confirming the vulnerability):
 
 ```solidity
 // artifacts/replay/VulnerableReproducer_Bridge_0012.t.sol
@@ -288,3 +288,11 @@ Console output uses verdict + evidence strength labels:
 │  ...                                                                     │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+
+## References
+
+- [Foundry fork testing](https://getfoundry.sh/forge/fork-testing) — multi-fork replay backend (`createFork`/`selectFork`)
+- [Foundry cheatcodes](https://getfoundry.sh/reference/cheatcodes/mock-call/) — `vm.mockCall` (documented for comparison; not used in generated replay contracts)
+- [Echidna](https://github.com/crytic/echidna) — fuzzer, primary probe tool for concrete counterexamples
+- [Halmos](https://github.com/a16z/halmos) — symbolic engine for bounded confirmation of counterexamples

@@ -172,3 +172,12 @@ All adapters produce the same internal structs regardless of the tool's native f
 - Stripping tool-specific noise from evidence.
 
 Raw tool output is preserved in `Evidence.raw` for debugging and audit, tagged with the chain it came from.
+
+
+---
+
+## References
+
+- [Halmos](https://github.com/a16z/halmos) — symbolic execution engine used for bounded formal verification
+- [Echidna](https://github.com/crytic/echidna) — fuzzer used for concrete sequence exploration
+- [Foundry](https://getfoundry.sh/) — Solidity development framework; invariant files follow Foundry test conventions
