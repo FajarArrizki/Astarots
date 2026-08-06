@@ -1,6 +1,8 @@
 # Adapter Protocol
 
-Each adapter wraps one external analysis tool and exposes it to the harness through a uniform interface. The harness never calls a tool directly — it goes through the adapter, which handles process management, configuration, and output normalization.
+Each adapter wraps one external analysis tool and exposes it to the harness through a uniform interface. The harness never calls a tool directly — it goes through the adapter, which handles process management, chain-specific configuration, and output normalization.
+
+For cross-chain probing, adapters receive a `chain` context. They deploy the target contract on the specified chain, configure the mock relayer, and restrict their analysis to that chain's sub-invariant. Tools never see two chains simultaneously — the decomposition and recombination happen at the harness layer.
 
 ---
 
@@ -8,32 +10,21 @@ Each adapter wraps one external analysis tool and exposes it to the harness thro
 
 Every adapter must implement three methods:
 
-### `probe(target, invariant, constraints, sequence_prefix) → list[Candidate]`
+### `probe(target, invariant, constraints, sequence_prefix, chain) → list[Candidate]`
 
-Run the tool in **exploration mode**. Given the current search state, ask the tool: "what are the most suspicious next steps?" The tool returns ranked candidates, each identifying a function to call and why it looks interesting.
+Run the tool in **exploration mode** on one chain. Given the current search state and chain context, ask the tool: "what are the most suspicious next steps on this chain?" The tool returns ranked candidates.
 
-For Echidna this means fuzzing with the accumulated constraints as a seed. For Slither this means static analysis filtered to functions reachable from the current call sequence. For Halmos this means symbolic execution with the current constraints as path conditions.
+For cross-chain probing, constraints may include `CROSS_CHAIN` conditions that reference the other chain's state. The adapter translates these into concrete preconditions on its chain — for example, a constraint that "source chain emitted TokensLocked(100)" becomes "mock relayer delivers a message with amount=100" on the destination chain.
 
-The adapter is responsible for translating the tool's native output format into `Candidate` structs. Each candidate must include a suspicion score normalized to `[0.0, 1.0]`.
+### `execute(target, sequence, constraints, chain) → ExecutionResult`
 
-### `execute(target, sequence, constraints) → ExecutionResult`
+Run the tool in **execution mode** on one chain. Execute a concrete call sequence against the target contract deployed on the specified chain. This is the combined reachability-check + invariant-check step.
 
-Run the tool in **execution mode**. Execute a concrete call sequence against the target contract with the given state constraints and return the result. This is the combined reachability-check + invariant-check step.
+For cross-chain sequences, the harness' mock relayer feeds events from the source chain into the destination chain's adapter. The adapter itself only sees its own chain.
 
-The adapter must report:
+### `confirm(target, sequence, constraints, chain, expected_result) → bool`
 
-- Whether the sequence executed without unexpected revert (`reachable: bool`).
-- If reverted, the revert reason and whether it is expected under the constraints.
-- The contract state before and after execution.
-- Any side effects (events emitted, storage changes).
-
-### `confirm(target, sequence, constraints, expected_result) → bool`
-
-Run the tool in **verification mode**. Given an edge case found by another tool, independently verify it. This must use a different analysis method than the original probe to qualify as independent confirmation.
-
-For example: if Echidna found a counterexample, Halmos can symbolically verify that the path is always reachable under the given constraints. If Slither flagged a pattern, Echidna can fuzz to see if it produces a concrete violation.
-
-Returns `True` if the tool confirms the finding, `False` otherwise.
+Run the tool in **verification mode** on one chain. Independently verify an edge case found by another tool on the same chain. Must use a different analysis method than the original probe.
 
 ---
 
@@ -41,44 +32,50 @@ Returns `True` if the tool confirms the finding, `False` otherwise.
 
 ### Echidna Adapter
 
-Echidna is a fuzzer. It works by generating random call sequences and checking invariants after each sequence.
+Echidna is a fuzzer. Best suited for concrete sequence exploration and boundary fuzzing of cross-chain state machines.
 
-**Probe mode:** Run Echidna with the invariant as a property check. Use the accumulated constraints as a `cryticArgs` seed to bias the fuzzer toward functions and state conditions of interest. Parse the corpus to extract call sequences that came closest to violating the invariant (even if they didn't fully break it). Rank by coverage delta — sequences that explored new code paths score higher.
+**Cross-chain relevance:** Echidna excels at finding concrete call sequences that push the protocol to boundary conditions — guardians at exactly M-1 signatures, sequence numbers at wraparound points, message queues at capacity. For cross-chain probing, Echidna is typically the primary probe tool because it produces executable sequences that can be replayed and correlated across chains.
 
-**Execute mode:** Replay a specific call sequence through Echidna's execution engine. Capture the state diff and any assertion failures. Echidna's execution is concrete (not symbolic), so the result is deterministic for a given sequence and initial state.
+**Probe mode:** Deploy contract on the specified chain. Apply cross-chain constraints as seed configuration. Run fuzzing with the sub-invariant as a property check. Parse corpus for sequences that explore cross-chain-interacting functions.
 
-**Confirm mode:** Run Echidna with the edge case sequence as a seed, but allow the fuzzer to vary parameters slightly. If the invariant still breaks across parameter variations, the edge case is robust (not a fluke).
+**Execute mode:** Replay a specific call sequence through Echidna's concrete execution engine. Forward cross-chain events to the mock relayer for the other chain's adapter.
+
+**Confirm mode:** Re-run fuzzing with the edge case sequence as seed, varying parameters. If the sub-invariant holds across variations, the edge case is robust.
 
 ### Halmos Adapter
 
-Halmos is a symbolic execution engine. It explores all possible paths through a contract, representing inputs as symbolic variables.
+Halmos is a symbolic execution engine. Best suited for formally verifying threshold logic, signature verification, and numeric bounds in cross-chain invariants.
 
-**Probe mode:** Run Halmos with the invariant as a target assertion. Constrain symbolic variables to match the accumulated constraints (`assume` directives). Halmos returns SAT (a violation exists) or UNSAT (the invariant holds for all inputs). If SAT, extract the counterexample as a concrete candidate. If UNSAT, this branch is proven safe and can be pruned.
+**Cross-chain relevance:** Halmos is the preferred confirmation tool for cross-chain edge cases involving numeric thresholds — guardian quorum, message count, fee boundaries. It can symbolically prove that a counterexample is reachable for all inputs within the given constraints, not just the concrete values Echidna found.
 
-**Execute mode:** Not Halmos' strength — symbolic execution is expensive for concrete replay. For execute mode, Halmos can verify that a given sequence is reachable by checking path conditions symbolically, but the actual state diff should come from a concrete executor (Echidna or a direct RPC call).
+**Probe mode:** Run symbolic execution on the specified chain with the sub-invariant as a target assertion. Constrain symbolic variables to match accumulated constraints. SAT → extract counterexample. UNSAT → branch is proven safe on this chain.
 
-**Confirm mode:** Halmos is the preferred confirmation tool. Given an edge case sequence and constraints, run Halmos symbolically. If it returns SAT with the same counterexample, the edge case is formally verified.
+**Execute mode:** Verify path reachability symbolically for a given sequence. Returns SAT/UNSAT but does not produce a concrete state diff — pair with Echidna for concrete execution.
+
+**Confirm mode:** Given an edge case from Echidna, symbolically verify the path on the same chain. SAT with matching counterexample → confirmed.
 
 ### Slither Adapter
 
-Slither is a static analysis framework. It analyzes contract code without executing it.
+Slither is a static analysis framework. Best suited for detecting structural vulnerabilities in cross-chain entry points — missing access control, unchecked return values from cross-chain calls, reentrancy paths that span the bridge.
 
-**Probe mode:** Run Slither's detectors on the target contract. Filter results to functions that are reachable from the current call sequence and that touch storage variables relevant to the invariant. Slither cannot produce call sequences — its candidates are individual functions flagged by detectors (reentrancy, unchecked calls, access control gaps). These become targets for dynamic tools.
+**Cross-chain relevance:** Slither identifies code patterns that create cross-chain attack surface: functions callable by the relayer without proper authentication, storage variables writable from cross-chain messages without validation, missing checks on message origin. These become seed targets for Echidna's dynamic exploration.
 
-**Execute mode:** Slither cannot execute. The adapter should delegate to a lightweight concrete executor (direct RPC call or a bundled EVM runner) for the actual state transition.
+**Probe mode:** Run static analysis on the specified chain's contract. Filter detectors to cross-chain-relevant patterns: access control on relayer-callable functions, taint from message payloads to storage, missing validation on cross-chain events.
 
-**Confirm mode:** Not applicable in the standard sense — Slither's findings are warnings, not counterexamples. However, if Echidna found a counterexample that exploits a pattern Slither flagged, Slither's analysis can be cited as corroborating evidence.
+**Execute mode:** Slither cannot execute. Delegate to a lightweight concrete executor for state transitions.
+
+**Confirm mode:** Slither's findings serve as corroborating evidence, not independent confirmation in the formal sense. If Echidna found a counterexample that exploits a pattern Slither flagged, the finding is strengthened but not "proven" without symbolic verification from Halmos.
 
 ---
 
 ## Adding a New Adapter
 
-To add support for a new tool (e.g., Manticore, Mythril, Certora):
+To add support for a new tool:
 
-1. Create `devil/adapter/<tool_name>.py` implementing the three-method interface.
+1. Create `devil/adapter/<tool_name>.py` implementing the three-method interface with `chain` parameter support.
 2. Register it in the adapter registry with a unique name and the path to the tool binary.
-3. Add a `ToolConfig` entry specifying CLI flags, timeout defaults, and output format.
-4. Add a section to this document describing the tool's strengths and probe/execute/confirm strategies.
+3. Add a `ToolConfig` entry specifying CLI flags, timeout defaults, chain-specific options, and output format.
+4. Add a section to this document describing the tool's cross-chain strengths.
 
 No harness code outside the adapter directory should change.
 
@@ -86,11 +83,11 @@ No harness code outside the adapter directory should change.
 
 ## Output Normalization
 
-All adapters produce the same internal structs. The normalization layer inside each adapter is responsible for:
+All adapters produce the same internal structs regardless of the tool's native format. The normalization layer handles:
 
-- Parsing tool-specific output formats (JSON, text, SARIF, custom).
-- Mapping tool-specific severity levels to the harness' unified scale.
-- Converting tool-specific call representations (Echidna sequences, Halmos traces) into the harness' `Call` and `Sequence` types.
-- Stripping tool-specific noise (timestamps, build IDs, progress bars) from evidence.
+- Parsing tool-specific output (JSON, text, SARIF).
+- Mapping severity levels to the harness' unified scale.
+- Converting call representations into harness `Call` and `Sequence` types, tagged with the `chain` they belong to.
+- Stripping tool-specific noise from evidence.
 
-Raw tool output is preserved in `Evidence.raw` for debugging and audit trails.
+Raw tool output is preserved in `Evidence.raw` for debugging and audit, tagged with the chain it came from.

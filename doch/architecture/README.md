@@ -1,46 +1,65 @@
 # Architecture
 
-Astarots is a **guided attack-surface explorer** for Solidity contracts. It combines multiple analysis tools under a single harness to discover deep edge cases that no single tool can find alone. The core idea: each tool probes the contract from a different angle, and the results of one tool become the starting point for the next — progressively tightening constraints until an edge case is either proven or exhausted.
+Astarots is a **cross-chain invariant testing harness**. It takes invariants that span multiple chains — bridge balance equality, message replay protection, guardian quorum thresholds — decomposes them into per-chain sub-probes, runs guided search through multiple analysis tools, and recombines the results to verify the full cross-chain property.
+
+The core idea: a cross-chain invariant is broken into single-chain assertions, each probed independently by the best tool for that chain's context. The harness then checks that no combination of per-chain violations violates the overall cross-chain property. This decomposition is what makes deep cross-chain edge cases discoverable — no single tool can simulate two chains simultaneously at the depth required.
 
 ---
 
 ## Data Flow
 
 ```
-                       ┌──────────────────────┐
-                       │   test/*.t.sol        │
-                       │   Invariant definitions│
-                       └──────────┬───────────┘
-                                  │
-                                  ▼
-┌─────────────────────────────────────────────────────────────┐
-│                         Harness                              │
-│                                                              │
-│  ┌──────────┐    ┌──────────────┐    ┌───────────────────┐  │
-│  │ Invariant│───▶│   Scheduler  │───▶│  Adapter Registry │  │
-│  │  Loader  │    │ (beam search)│    │  (echidna, halmos, │  │
-│  └──────────┘    └──────┬───────┘    │   slither, ...)    │  │
-│                         │            └─────────┬─────────┘  │
-│                         │                      │            │
-│                         ▼                      ▼            │
-│               ┌─────────────────┐   ┌───────────────────┐   │
-│               │  Search Engine  │   │  Tool Adapters    │   │
-│               │                 │   │                   │   │
-│               │  - beam search  │   │  spawn tool       │   │
-│               │  - state dedup  │   │  parse output     │   │
-│               │  - priority Q   │   │  normalize →      │   │
-│               │  - constraint   │   │  internal structs │   │
-│               │    consistency  │   │                   │   │
-│               └────────┬────────┘   └───────────────────┘   │
-│                        │                                     │
-│                        ▼                                     │
-│               ┌─────────────────┐                            │
-│               │  Report Engine  │                            │
-│               │  - console      │                            │
-│               │  - JSON         │                            │
-│               │  - HTML         │                            │
-│               └─────────────────┘                            │
-└─────────────────────────────────────────────────────────────┘
+                      ┌──────────────────────────┐
+                      │    test/*.t.sol            │
+                      │    Cross-chain invariants   │
+                      │    @crosschain src=eth      │
+                      │              dst=poly       │
+                      └────────────┬───────────────┘
+                                   │
+                                   ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                          Harness                                   │
+│                                                                    │
+│  ┌───────────────┐   ┌──────────────────┐   ┌──────────────────┐  │
+│  │   Invariant   │──▶│  Cross-Chain     │──▶│  Chain Registry  │  │
+│  │   Loader      │   │  Decomposer      │   │  (eth, poly, ...)│  │
+│  └───────────────┘   └────────┬─────────┘   └──────────────────┘  │
+│                               │                                    │
+│         ┌─────────────────────┼─────────────────────┐             │
+│         ▼                     ▼                     ▼             │
+│  ┌────────────┐       ┌────────────┐       ┌────────────┐        │
+│  │ Per-Chain  │       │ Per-Chain  │       │ Per-Chain  │        │
+│  │ Scheduler  │       │ Scheduler  │       │ Scheduler  │        │
+│  │ (eth)      │       │ (poly)     │       │ (arb)      │        │
+│  └─────┬──────┘       └─────┬──────┘       └─────┬──────┘        │
+│        │                    │                    │                │
+│        ▼                    ▼                    ▼                │
+│  ┌──────────────────────────────────────────────────────────┐    │
+│  │               Search Engine (shared)                      │    │
+│  │  - beam search    - state dedup    - priority Q           │    │
+│  │  - constraint consistency    - reachability check         │    │
+│  └──────────────────────────┬───────────────────────────────┘    │
+│                             │                                     │
+│                             ▼                                     │
+│  ┌──────────────────────────────────────────────────────────┐    │
+│  │               Adapter Registry                             │    │
+│  │  echidna ─── halmos ─── slither ─── ...                   │    │
+│  └──────────────────────────┬───────────────────────────────┘    │
+│                             │                                     │
+│                             ▼                                     │
+│  ┌──────────────────────────────────────────────────────────┐    │
+│  │               Cross-Chain Recombiner                       │    │
+│  │  - merge per-chain findings                                │    │
+│  │  - verify cross-chain invariant holds                      │    │
+│  │  - detect multi-chain attack vectors                       │    │
+│  └──────────────────────────┬───────────────────────────────┘    │
+│                             │                                     │
+│                             ▼                                     │
+│  ┌──────────────────────────────────────────────────────────┐    │
+│  │               Report Engine                                │    │
+│  │  - console (per-chain trace)    - JSON    - HTML           │    │
+│  └──────────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -49,51 +68,52 @@ Astarots is a **guided attack-surface explorer** for Solidity contracts. It comb
 
 ### Invariant Loader
 
-Parses `.t.sol` test files and extracts invariant function signatures, target contracts, and any metadata annotations. Produces a normalized `Invariant` struct that the rest of the harness consumes. Does not execute anything — just reads and validates.
+Parses `.t.sol` test files and extracts cross-chain invariant function signatures. Identifies the `@crosschain` NatSpec tag specifying source and destination chains. Produces a normalized `CrossChainInvariant` struct containing per-chain contract references and the cross-chain assertion. Also supports single-chain invariants for completeness, but they are treated as a degenerate case (one chain, trivial recomposition).
 
-A single `.t.sol` file may declare multiple invariants. Each invariant may specify which tools to run against it, or default to all registered tools.
+### Cross-Chain Decomposer
 
-### Scheduler
+Breaks a cross-chain invariant into per-chain sub-invariants. For a bridge invariant like `locked_src == minted_dst`, the decomposer produces:
 
-Orchestrates the beam search across tools and depth. Given a target contract and an invariant, the scheduler:
+- **Sub-invariant for source chain:** `locked_src` never decreases without a corresponding message event.
+- **Sub-invariant for destination chain:** `minted_dst` never increases without a corresponding message event.
+- **Cross-chain check (Python):** for every message event pair, `locked_src(event) == minted_dst(event)`.
 
-- Initializes the search frontier with an empty `SearchState`.
-- At each depth, probes the contract through one or more adapters.
-- Ranks candidates by suspicion, applies beam width, checks constraint consistency, deduplicates states, and pushes reachable states back into the frontier.
-- Continues until max depth or state budget is exhausted.
-- Returns the deepest confirmed `EdgeCase`, or nothing if no violation was found.
+Each sub-invariant is a standard single-chain assertion that adapters can handle natively. The decomposer also determines which tool-adapter combinations are most effective for each sub-invariant based on the property type.
 
-The scheduler is tool-agnostic. It only knows about `SearchState`, `EdgeCase`, and the adapter interface.
+### Chain Registry
 
-### Adapter Registry
+Manages per-chain configuration: RPC endpoints, contract deployments, mock relayer setup, and chain-specific tool settings. Each chain is registered with a unique alias (`eth`, `poly`) used throughout the harness. The chain registry also handles mock cross-chain communication — simulating message passing between chains for tools that execute concrete sequences.
 
-Maps tool names (`echidna`, `halmos`, `slither`) to their adapter implementations. Each adapter conforms to a shared protocol so the scheduler can call `probe()`, `execute()`, and `confirm()` without knowing which tool is behind the interface.
+### Per-Chain Scheduler
 
-### Tool Adapters
-
-Each adapter wraps one external tool and is responsible for:
-
-- Translating invariant + constraints into tool-specific input (config files, CLI args, seed state).
-- Spawning the tool process and capturing output.
-- Parsing tool-specific output into the harness' internal `Finding` and `Candidate` structs.
-- Supporting re-entrant execution with narrowed constraints for the enrichment loop.
-
-The first adapters to implement: Echidna (fuzzing), Slither (static analysis), Halmos (symbolic execution).
+One scheduler instance per chain. Each runs the beam search independently on its assigned sub-invariant, using the shared search engine. Schedulers can run in parallel — they operate on separate chains and their search states are independent. The per-chain schedulers produce per-chain `EdgeCase` lists.
 
 ### Search Engine
 
-The core algorithm implementation. Houses `SearchState`, `EdgeCase`, the priority queue frontier, constraint deduplication, and the main `deepest_edge()` loop. All logic is pure Python with no external process dependencies, making it testable in isolation.
+The core algorithm shared across all per-chain schedulers. Houses `SearchState`, `EdgeCase`, the priority queue frontier, constraint deduplication, and the main `deepest_edge()` loop. The search engine is chain-agnostic — it receives a chain context from the scheduler and passes it through to adapters.
+
+### Adapter Registry
+
+Maps tool names to adapter implementations. Each adapter conforms to a shared protocol. The registry routes per-chain probe requests to the appropriate adapter, passing chain-specific configuration. Adapters for cross-chain-relevant tools are prioritized: Echidna for concrete sequence fuzzing, Halmos for formal verification of threshold logic, Slither for static detection of missing access control on cross-chain entry points.
+
+### Cross-Chain Recombiner
+
+After all per-chain searches complete, the recombiner merges findings and checks the original cross-chain invariant. It correlates per-chain `EdgeCase` lists: a source-chain finding about `locked` state combined with a destination-chain finding about `minted` state may together violate the cross-chain property even if neither chain's sub-invariant broke in isolation. This is where the deepest cross-chain edge cases emerge — they are invisible to per-chain probing but detectable at the recombination layer.
 
 ### Report Engine
 
-Takes the final `EdgeCase` (or a list of findings across multiple invariants) and renders them for human consumption. Initial output target is a console table. JSON and HTML formatters follow once the console path is stable.
+Renders findings with per-chain trace annotations. Each call in a cross-chain attack sequence is labeled with the chain it executes on and the tool that discovered it. The report distinguishes between per-chain findings and true cross-chain violations.
 
 ---
 
 ## Key Design Decisions
 
-**Adapters are stateless.** Each call to `probe()` or `execute()` receives the full context as arguments. This means adapters can be parallelized — the scheduler can probe multiple candidates across different tools simultaneously without shared mutable state.
+**Cross-chain is the primary mode.** The harness is designed around multi-chain invariants from the ground up. Single-chain invariants are supported as a degenerate case (one chain, identity recomposition) and will be elevated to first-class in a future milestone.
 
-**The harness never modifies Solidity source.** Invariants are defined in `.t.sol` using standard Foundry conventions. The harness reads, spawns tools, and collects results — it does not inject code, rewrite imports, or alter the compilation pipeline.
+**Decomposition happens at the invariant level, not the tool level.** Tools never see "two chains." They see one chain with a sub-invariant. The recombiner handles the multi-chain property. This means all existing single-chain tools work without modification — no tool needs to understand cross-chain semantics.
 
-**Cross-chain is a scheduling concern, not an adapter concern.** Cross-chain invariants are decomposed by the scheduler into per-chain sub-invariants. Each sub-invariant is handed to adapters as a normal single-chain probe. The scheduler recombines the results and checks the cross-chain property in Python.
+**Per-chain schedulers are independent and parallelizable.** The source chain search and destination chain search share no state. They run concurrently, each benefiting from the full state budget. Only at recombination do results merge.
+
+**Adapters are stateless.** Each call receives full chain + constraint context. Adapters can be reused across chains without shared mutable state.
+
+**The harness mocks cross-chain communication for concrete execution.** When Echidna replays a sequence on the source chain, the harness captures emitted message events and feeds them to the destination chain's mock relayer. This allows concrete replay of cross-chain attack sequences without running a real relayer or two live chains.

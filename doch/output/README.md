@@ -1,125 +1,157 @@
 # Output & Evidence
 
-Every edge case found by the harness is backed by reproducible evidence. The output layer is responsible for presenting findings clearly, preserving the raw data that produced them, and enabling replay.
+Every cross-chain edge case found by the harness is backed by reproducible per-chain evidence. The output layer presents findings with per-chain trace annotations, preserves raw tool output from each chain, and generates multi-chain replay contracts.
 
 ---
 
-## Evidence Chain
+## Evidence Chain (Cross-Chain)
 
-When the harness reports an edge case, it includes the full chain of evidence that led to it:
+When the harness reports a cross-chain edge case, it includes the full evidence chain from both sides:
 
 ```
-EdgeCase
-├── invariant:          which invariant was violated
-├── depth:              how deep in the search tree
-├── sequence:           exact call sequence that triggers the violation
-├── constraints:        preconditions required to reproduce
-├── impact:             what breaks and the estimated severity
-├── evidence:
-│   ├── primary:        the tool that first found the violation
-│   │   ├── tool:       echidna | halmos | slither
-│   │   ├── output:     raw tool output
-│   │   └── trace:      normalized call trace
-│   └── confirmation:   the tool that independently verified
-│       ├── tool:       echidna | halmos | slither
-│       ├── output:     raw tool output
-│       └── result:     confirmed | refuted | inconclusive
-├── confidence:         proven | reproduced | suspected
+CrossChainEdgeCase
+├── invariant:          which cross-chain invariant was violated
+├── depth:              combined search depth across chains
+├── chains:             [ethereum, polygon]
+├── cross_violation:    the cross-chain property that broke
+├── per_chain:
+│   ├── ethereum:
+│   │   ├── sequence:   call sequence on source chain
+│   │   ├── constraints:preconditions on source chain
+│   │   └── evidence:
+│   │       ├── primary:       tool that found source-chain violation
+│   │       └── confirmation:  independent verification
+│   └── polygon:
+│       ├── sequence:   call sequence on destination chain
+│       ├── constraints:preconditions on destination chain
+│       └── evidence:
+│           ├── primary:       tool that found dest-chain violation
+│           └── confirmation:  independent verification
+├── correlation:        how the two chains' findings connect
+├── confidence:         proven | reproduced
 └── artifact:           path to saved JSON for replay
 ```
 
-This structure answers three questions an auditor or developer will ask:
+This answers three questions:
 
-- **What happened?** — the invariant, sequence, and impact.
-- **How was it found?** — the primary tool and its raw output.
-- **Can I trust it?** — the independent confirmation and confidence level.
+- **What happened on each chain?** — per-chain sequences, constraints, and impact.
+- **How do they connect?** — the correlation that makes this a true cross-chain edge case.
+- **Can I trust it?** — independent confirmation per chain, and cross-chain consistency check.
 
 ---
 
 ## Console Output
 
-The default output format is a table rendered to the terminal, designed for rapid scanning during development:
+Cross-chain probe output shows per-chain findings and the correlation that ties them together:
 
 ```
-┌─ VaultInvariants ─────────────────────────────────────────────────────────┐
-│                                                                            │
-│  invariant_no_overdraft                                                    │
-│  ════════════════════════                                                  │
-│  Status:   PASS                                                            │
-│  Tools:    echidna (50000 seqs), halmos (UNSAT), slither (clean)           │
-│                                                                            │
-│  invariant_deposit_equals_shares                                           │
-│  ═════════════════════════════                                             │
-│  Status:   FAIL — PROVEN                                                   │
-│  Depth:    3                                                               │
-│  Impact:   HIGH — users can withdraw more than deposited                   │
-│                                                                            │
-│  Sequence:                                                                 │
-│    1. setDelegate(attacker)                          [echidna]              │
-│    2. deposit(100 ether)                             [echidna]              │
-│    3. rebalance()  ← oracle reverts at token[2]      [slither → echidna]   │
-│    4. withdraw(50 ether)  ← uses stale price         [echidna → halmos]    │
-│                                                                            │
-│  Constraints:                                                              │
-│    • delegate must be attacker-controlled                                  │
-│    • oracle must be stale (>60s since last update)                         │
-│    • fee must be set to maximum (10000 bps)                                │
-│    • rebalance must partially fail (token[2] reverts)                      │
-│                                                                            │
-│  Evidence:                                                                 │
-│    Primary:      echidna  →  counterexample found at seq #48210            │
-│    Confirmation: halmos   →  SAT, path is symbolically reachable           │
-│    Confidence:   PROVEN                                                     │
-│    Replay:       astarots replay --edge-case vault-edge-0042.json          │
-│                                                                            │
-└────────────────────────────────────────────────────────────────────────────┘
+┌─ BridgeInvariants ─────────────────────────────────────────────────────┐
+│                                                                         │
+│  invariant_valid_quorum_required                                        │
+│  ═══════════════════════════════                                        │
+│  Status:   FAIL — PROVEN                                                │
+│  Depth:    eth:3 + poly:2 → cross-chain confirmed                       │
+│  Impact:   CRITICAL — unauthorized cross-chain message execution        │
+│                                                                         │
+│  Ethereum:                                                               │
+│    [guardianRotation(), submitMessage(data), verifySignatures(13)]       │
+│    └─ echidna → halmos  (sig threshold crossed with mixed guardian set) │
+│                                                                         │
+│  Polygon:                                                                │
+│    [receiveMessage(data), executeAction()]                               │
+│    └─ echidna  (message accepted with insufficient per-set quorum)      │
+│                                                                         │
+│  Cross-Chain Correlation:                                                │
+│    └─ Guardian rotation in-flight on ethereum                            │
+│    └─ 7 old-guardian sigs + 6 new-guardian sigs = 13 (passed threshold) │
+│    └─ Polygon verifies against old set → only 7 valid sigs (< 13)       │
+│    └─ BUT polygon's verifySignatures doesn't check set membership per-sig│
+│    └─ Result: message accepted on polygon with invalid quorum            │
+│                                                                         │
+│  Constraints:                                                            │
+│    • [eth] Guardian rotation must be pending (old set not expired)       │
+│    • [eth] 13 signatures: 7 from old guardians, 6 from new              │
+│    • [poly] verifySignatures counts sigs globally, not per guardian set  │
+│                                                                         │
+│  Evidence:                                                               │
+│    Primary (eth):     echidna  →  counterexample at seq #4210            │
+│    Confirmation (eth): halmos  →  SAT, mixed-quorum path is reachable    │
+│    Primary (poly):    echidna  →  counterexample at seq #873             │
+│    Correlation:       recombiner → per-set quorum < threshold             │
+│    Confidence:        PROVEN                                              │
+│    Replay:            astarots replay --edge-case bridge-edge-0012.json   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-The trace annotations (`[echidna]`, `[slither → echidna]`, `[echidna → halmos]`) show which tool discovered each step in the sequence, making the cross-tool enrichment visible.
+Trace annotations use `[chain]` labels and cross-tool enrichment markers. The correlation section is the critical addition — it explains why two per-chain findings that might appear benign in isolation combine into a protocol-level vulnerability.
 
 ---
 
 ## JSON Output
 
-For CI integration and programmatic consumption:
-
 ```bash
-astarots probe --target src/Vault.sol --output json
+astarots probe --target src/BridgeEth.sol,src/BridgePoly.sol --chains eth,poly --output json
 ```
-
-Produces:
 
 ```json
 {
-  "target": "src/Vault.sol",
+  "targets": {
+    "ethereum": "src/BridgeEth.sol",
+    "polygon": "src/BridgePoly.sol"
+  },
   "invariants": [
     {
-      "name": "invariant_deposit_equals_shares",
+      "name": "invariant_valid_quorum_required",
       "status": "proven",
-      "depth": 3,
-      "impact": "HIGH",
-      "sequence": [
-        {"call": "setDelegate(address)", "args": ["0xattacker"], "source": "echidna"},
-        {"call": "deposit(uint256)", "args": ["100000000000000000000"], "source": "echidna"},
-        {"call": "rebalance()", "args": [], "source": "slither→echidna"},
-        {"call": "withdraw(uint256)", "args": ["50000000000000000000"], "source": "echidna→halmos"}
-      ],
-      "constraints": [
-        {"kind": "STATE_VAR", "target": "delegate", "value": "attacker"},
-        {"kind": "TIMING", "target": "oracle", "value": "staleness > 60s"},
-        {"kind": "STATE_VAR", "target": "fee", "value": 10000}
-      ],
-      "evidence": {
-        "primary": {"tool": "echidna", "output": "...", "trace": "..."},
-        "confirmation": {"tool": "halmos", "result": "confirmed"}
+      "depth": {"ethereum": 3, "polygon": 2},
+      "impact": "CRITICAL",
+      "chains": ["ethereum", "polygon"],
+      "per_chain": {
+        "ethereum": {
+          "sequence": [
+            {"call": "guardianRotation()", "source": "slither→echidna"},
+            {"call": "submitMessage(bytes)", "source": "echidna"},
+            {"call": "verifySignatures(uint256)", "args": [13], "source": "echidna→halmos"}
+          ],
+          "constraints": [
+            {"kind": "STATE_VAR", "target": "guardianSet", "value": "rotation_pending"},
+            {"kind": "CROSS_CHAIN", "target": "signature_count", "value": 13}
+          ]
+        },
+        "polygon": {
+          "sequence": [
+            {"call": "receiveMessage(bytes)", "source": "echidna"},
+            {"call": "executeAction()", "source": "echidna"}
+          ],
+          "constraints": [
+            {"kind": "ACCESS", "target": "verifySignatures", "value": "no_per_set_check"}
+          ]
+        }
       },
-      "artifact": "artifacts/vault-edge-0042.json"
+      "correlation": {
+        "type": "mixed_guardian_quorum",
+        "old_guardian_sigs": 7,
+        "new_guardian_sigs": 6,
+        "threshold": 13,
+        "violation": "per-set quorum not enforced on destination chain"
+      },
+      "evidence": {
+        "ethereum": {
+          "primary": {"tool": "echidna", "output": "...", "trace": "..."},
+          "confirmation": {"tool": "halmos", "result": "confirmed"}
+        },
+        "polygon": {
+          "primary": {"tool": "echidna", "output": "...", "trace": "..."}
+        }
+      },
+      "artifact": "artifacts/bridge-edge-0012.json"
     }
   ],
   "summary": {
-    "total": 3,
+    "total": 4,
     "passed": 1,
-    "proven": 1,
+    "proven": 2,
     "reproduced": 1
   }
 }
@@ -127,59 +159,76 @@ Produces:
 
 ---
 
-## Replay Contract
+## Multi-Chain Replay Contract
 
-Each edge case artifact can be replayed as a standalone Foundry test. The harness generates a replay contract:
+Each cross-chain edge case generates a replay contract that reproduces the full multi-chain sequence using Foundry's `vm` cheatcodes to simulate the second chain:
 
 ```solidity
-// artifacts/replay/Vault_edge_0042.t.sol
+// artifacts/replay/Bridge_edge_0012.t.sol
 // Auto-generated by Astarots — do not edit manually
-// Original finding: invariant_deposit_equals_shares
-// Depth: 3 | Confidence: PROVEN
+// Original finding: invariant_valid_quorum_required
+// Chains: ethereum + polygon | Confidence: PROVEN
 
 pragma solidity ^0.8.0;
 
 import {Test} from "forge-std/Test.sol";
-import {Vault} from "../../src/Vault.sol";
+import {BridgeEth} from "../../src/BridgeEth.sol";
+import {BridgePoly} from "../../src/BridgePoly.sol";
 
-contract Replay_Vault_edge_0042 is Test {
-    Vault vault;
-    address attacker = address(0xbad);
+contract Replay_Bridge_edge_0012 is Test {
+    BridgeEth bridgeEth;
+    BridgePoly bridgePoly;
+
+    address[] oldGuardians;
+    address[] newGuardians;
 
     function setUp() public {
-        // Reproduce constraints
-        vm.warp(block.timestamp + 61);  // oracle staleness > 60s
-        vault = new Vault();
-        vault.setFee(10000);             // fee = max
-        vault.setDelegate(attacker);     // delegate = attacker
+        // Deploy both contracts
+        bridgeEth = new BridgeEth();
+        bridgePoly = new BridgePoly();
+
+        // Set up guardian sets
+        // ... (harness generates exact guardian addresses)
     }
 
-    function test_replay_edge_case() public {
-        // Step 1: deposit
-        vm.prank(attacker);
-        vault.deposit{value: 100 ether}();
+    function test_replay_cross_chain_edge() public {
+        // === ETHEREUM SIDE ===
 
-        // Step 2: rebalance (partial failure)
-        // Mock oracle revert for token[2]
-        vm.mockCallRevert(
-            address(vault.oracle()),
-            abi.encodeWithSignature("getPrice(uint256)", 2),
-            "Oracle: stale price"
+        // Step 1: Initiate guardian rotation (old set not yet expired)
+        bridgeEth.initiateGuardianRotation(newGuardians);
+
+        // Step 2: Submit message signed by mixed guardian set
+        bytes memory message = abi.encode(/* ... */);
+        bytes[] memory signatures = new bytes[](13);
+        // 7 sigs from old guardians, 6 from new guardians
+        // ... (harness generates exact signatures)
+        bridgeEth.submitMessage(message, signatures);
+
+        // Step 3: Verify — crosses threshold with combined sigs
+        bridgeEth.verifySignatures(13);
+
+        // === CROSS-CHAIN: Mock relayer ===
+        bytes32 messageHash = keccak256(message);
+        vm.mockCall(
+            address(bridgePoly),
+            abi.encodeWithSignature("messageHash()"),
+            abi.encode(messageHash)
         );
-        vault.rebalance();
 
-        // Step 3: withdraw — this should trigger the violation
-        vm.prank(attacker);
-        vm.expectRevert();  // if fixed, this should revert
-        vault.withdraw(50 ether);
+        // === POLYGON SIDE ===
+
+        // Step 4: Receive message — should require per-set quorum
+        //        but doesn't check set membership per signature
+        bridgePoly.receiveMessage(message, signatures);
+
+        // Step 5: Execute action — this should fail but succeeds
+        vm.expectRevert();  // if fixed, should revert here
+        bridgePoly.executeAction(message);
     }
 }
 ```
 
-The replay contract is a self-contained Foundry test. Running it verifies that:
-
-- The edge case still reproduces against the current contract (regression check).
-- A fix successfully prevents the violation (change `expectRevert` to check the invariant).
+The replay contract is a self-contained Foundry test that reproduces the cross-chain edge case using `vm.mockCall` to simulate the relayer between chains. Running it verifies that the edge case still reproduces, and that fixes prevent the violation.
 
 ---
 
@@ -187,8 +236,5 @@ The replay contract is a self-contained Foundry test. Running it verifies that:
 
 | Confidence | Meaning | Criteria |
 |---|---|---|
-| **PROVEN** | Formally verified by a second tool | Primary tool found counterexample, secondary tool confirmed it symbolically or through a different method |
-| **REPRODUCED** | Found by one tool, replayed successfully | The sequence executes and triggers the violation, but no independent symbolic verification exists |
-| **SUSPECTED** | Flagged by static analysis only | A pattern was identified but no concrete violation was produced |
-
-PROVEN findings are suitable for audit reports. REPRODUCED findings warrant investigation and possible fixes. SUSPECTED findings are informational — they guide further manual review.
+| **PROVEN** | Formally verified across chains | Per-chain counterexample confirmed by a second tool on at least one chain, AND cross-chain correlation formally checked by the recombiner |
+| **REPRODUCED** | Found and replayed successfully | Multi-chain sequence executes and triggers the cross-chain violation, but no independent symbolic verification exists |
