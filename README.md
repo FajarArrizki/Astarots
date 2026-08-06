@@ -1,6 +1,6 @@
 # Astarots
 
-Cross-chain invariant testing harness — **mainnet fork state archaeology**. Combines Echidna, Halmos, and Slither under a unified causal beam search to discover deep edge cases in cross-chain protocols. Invariants are checked against forked mainnet state at pinned blocks, not against freshly deployed contracts. The Wormhole protocol has operated for 5+ years — its code is clean, but the accumulated state may harbor edge cases invisible to code-level analysis.
+Cross-chain invariant testing harness — **mainnet fork state archaeology**. Combines Echidna, Halmos, and Slither under a unified causal beam search to discover deep edge cases in cross-chain protocols. Invariants are checked against forked mainnet state at pinned blocks, not against freshly deployed contracts. The Wormhole protocol has operated for 5+ years — its code is clean, but the accumulated state may harbor edge cases invisible to code-level analysis. **Milestone 1 scope: fork-state invariant testing** at pinned snapshot sets. Full historical archaeology (scanning multiple representative blocks across upgrade epochs) is deferred.
 
 ## Quick Start
 

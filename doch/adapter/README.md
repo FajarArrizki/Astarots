@@ -2,7 +2,22 @@
 
 Each adapter wraps one external analysis tool and exposes it to the harness through a uniform interface. The harness never calls a tool directly — it goes through the adapter, which handles process management, chain-specific configuration, and output normalization.
 
-For cross-chain probing, adapters receive a `chain` context with a pinned fork block. They **do not deploy contracts** — they fork mainnet at the configured block and operate on the existing contract state. The mock relayer is initialized from real pending messages in the bridge's queue at the fork block, plus any new messages emitted during probing. Tools never see two chains simultaneously — the decomposition and recombination happen at the harness layer.
+For cross-chain probing, adapters receive a `chain` context with a pinned fork block. They **do not deploy contracts** — they fork mainnet at the configured block and operate on the existing contract state.
+
+### Relay Mode
+
+Messages relayed between forks operate in one of four modes. The mode determines the authenticity of cross-chain signature verification:
+
+| Mode | Guardian Signatures | Use Case |
+|---|---|---|
+| **historical-authentic** | Real signed VAAs from Guardian network | Replaying known mainnet messages |
+| **protocol-valid-synthetic** | Signatures from explicit test guardian set | Testing protocol logic with valid synthetic signatures |
+| **modeled-relay** | Signature verification modeled or bypassed per assumption | Exploring application logic beyond verification boundary |
+| **raw-payload** | No signatures — raw payload injection after verification | Testing application response to arbitrary payloads |
+
+Findings in `modeled-relay` mode must not claim to bypass real guardian verification. Evidence stores the relay mode and trust assumptions. Findings in `historical-authentic` mode represent replay of actual mainnet activity.
+
+Tools never see two chains simultaneously — the decomposition and recombination happen at the harness layer.
 
 ---
 
@@ -101,7 +116,11 @@ Echidna is a fuzzer. Best suited for concrete sequence exploration and boundary 
 
 **Cross-chain relevance:** Echidna excels at finding concrete call sequences that push the protocol to boundary conditions — guardians at exactly M-1 signatures, sequence numbers at wraparound points, message queues at capacity. For cross-chain probing, Echidna is typically the primary probe tool because it produces executable sequences that can be replayed and correlated across chains.
 
-**Probe mode:** Fork mainnet at the configured block (`createSelectFork`). The contract is already deployed at its mainnet address with years of accumulated state. Apply cross-chain constraints extracted from the forked state as seed configuration. Run fuzzing with the sub-invariant as a property check. Parse corpus for sequences that explore cross-chain-interacting functions — the search starts from the real protocol state, not an empty deployment.
+**Probe mode:** Echidna supports native RPC-based state forking since v2.1.0. Configure `rpcUrl` and `rpcBlock` per chain — Echidna lazily fetches storage and bytecode from the RPC at the specified block. The contract is already deployed at its mainnet address; the adapter points Echidna's configuration at that address. Apply cross-chain constraints extracted from the forked state as seed configuration. Run fuzzing with the sub-invariant as a property check. Parse corpus for sequences that explore cross-chain-interacting functions — the search starts from the real protocol state, not an empty deployment.
+
+One Echidna process handles one chain with one base block. Cross-chain probing requires separate Echidna instances per chain. Fork cache is saved as an artifact for reproducibility. `warp`/`roll` only simulate local time — they do not advance historical mainnet state.
+
+*Reference: [Echidna state network forking](https://secure-contracts.com/program-analysis/echidna/advanced/state-network-forking.html)*
 
 **Execute mode:** Replay a specific call sequence through Echidna's concrete execution engine. Forward cross-chain events to the mock relayer for the other chain's adapter.
 
@@ -115,7 +134,17 @@ Halmos is a symbolic execution engine. Best suited for verifying threshold logic
 
 **Cross-chain relevance:** Halmos is the preferred confirmation tool for cross-chain edge cases involving numeric thresholds — guardian quorum, message count, fee boundaries. It can symbolically verify a counterexample under the given constraints, loop unrolling bounds, solver timeout, and trust assumptions.
 
-**Probe mode:** Run symbolic execution against the forked mainnet state. The starting storage values come from the pinned block — real guardian sets, real token balances, real message queues. Constrain symbolic variables to match both the forked state constraints and accumulated probe constraints. **SAT** produces a model/counterexample under the bounds and assumptions used — it does not mean the counterexample is reachable for all possible inputs, only that a model exists in the explored space. **UNSAT** means no counterexample was found in the explored search space under those assumptions — it does not mean the contract is safe in an absolute sense.
+**Probe mode:** Halmos does **not** support full RPC-based fork like Echidna or Foundry. The official Halmos fork example uses `vm.etch` to install bytecode and `vm.store` to set specific storage slots — it does not connect to a live RPC or enumerate full contract storage.
+
+For mainnet fork probing, the adapter uses **bounded state projection**: extract only the code + storage slots + environment values that a witness requires from the forked state, materialize them into Halmos via `vm.etch` and `vm.store`, and run symbolic execution against that projected state. The projection is always documented with a manifest of which slots were included and which were omitted.
+
+When Halmos confirms a counterexample under projected state, the evidence is labeled **`symbolically-confirmed-under-projected-state`** — not as if the full mainnet fork was verified. Until Halmos supports native RPC forking, it is limited to confirmation of per-witness projections.
+
+*Reference: [Halmos fork example](https://github.com/a16z/halmos/blob/main/examples/simple/test/Fork.t.sol)*
+
+**Execute mode:** Symbolic execution is expensive for concrete replay. Verify path reachability symbolically, but pair with Echidna or a lightweight executor for the actual state diff.
+
+**Confirm mode:** Given a witness from Echidna, project the witness's relevant code + storage into Halmos. **SAT** produces a model/counterexample under the projected state and bounds — evidence strength: `symbolically-confirmed-under-projected-state`. **UNSAT** means no counterexample was found in the projected state space under those assumptions — it does not mean the full mainnet fork is safe.
 
 **Execute mode:** Symbolic execution is expensive for concrete replay. Verify path reachability symbolically, but pair with Echidna or a lightweight executor for the actual state diff.
 

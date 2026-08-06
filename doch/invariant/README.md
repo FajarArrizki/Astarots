@@ -25,14 +25,23 @@ CrossChainInvariant:
 
 ### Context
 
-One chain can have multiple contracts. Each context binds a contract to its role:
+One chain can have multiple contracts. Each context binds a contract to its role and fork configuration:
 
 ```
 Context:
     chain_id: str                    # "ethereum", "polygon"
-    contract: str                    # contract name or address
+    contract: str                    # contract name for ABI/source resolution
+    address: str                     # mainnet deployed address (0x...)
     role: str                        # "source", "destination", "relayer", "governance"
     monitors: list[str]              # state variables or events to observe
+    fork_block: int                  # pinned mainnet block for this chain
+    abi_artifact: str                # path to ABI JSON (from source compilation)
+    proxy: Optional[ProxyInfo]       # if the target is behind a proxy
+
+ProxyInfo:
+    kind: str                        # "transparent" | "uups" | "beacon"
+    implementation_address: str      # implementation address at fork_block
+    implementation_code_hash: str    # hash for integrity verification
 ```
 
 ### Correlation Extractor
@@ -99,6 +108,12 @@ The decomposer uses these to check that a candidate's state change is valid unde
 
 ### ObservationPolicy
 
+Determines **when** the invariant is checked.
+
+**Scope note:** The harness performs **fork-state invariant testing** — checking invariants against a specific mainnet snapshot at a pinned block. This is not full historical archaeology (which would require multiple representative blocks across upgrade epochs, guardia rotations, and incident windows). A Snapshot Discovery phase (selecting blocks before/after key protocol transitions and clustering by state fingerprint) is deferred to a future milestone. The initial implementation tests one `SnapshotSet` per campaign.
+
+### ObservationPolicy
+
 Determines **when** the invariant is checked:
 
 ```
@@ -139,7 +154,16 @@ QuantifiedPredicate:
     kind: FORALL | EXISTS | FORALL_EXISTS
     bound_variables: list[str]       # variables from bindings
     predicate: str                   # assertion expression
+
+ObservationSet:
+    touched_message_ids: list[str]      # messages involved in the current probe
+    relay_dataset_ids: list[str]        # relay data records used
+    sampled_historical_ids: list[str]   # historical messages sampled (not full scan)
+    probe_generated_ids: list[str]      # messages generated during probing
+    max_items: int                      # upper bound for iteration (prevents OOG on mainnet)
 ```
+
+Mainnet invariants cannot iterate over the full 5-year history. `executedMessageCount()` scanning from index 0 on a long-lived contract is prohibitively expensive or out-of-gas. The `ObservationSet` bounds evaluation to messages that are part of the current campaign or witness — full linear scans of on-chain history are never performed in invariant functions.
 
 Examples:
 
@@ -168,16 +192,23 @@ QuantifiedPredicate(
 pragma solidity ^0.8.0;
 
 import {Test} from "forge-std/Test.sol";
-import {BridgeEth} from "../src/BridgeEth.sol";
-import {BridgePoly} from "../src/BridgePoly.sol";
+import {IBridgeEth} from "../src/interfaces/IBridgeEth.sol";
+import {IBridgePoly} from "../src/interfaces/IBridgePoly.sol";
 
 contract BridgeInvariants is Test {
-    BridgeEth bridgeEth;
-    BridgePoly bridgePoly;
+    // Mainnet-fork mode: cast to existing deployed addresses.
+    // The execution backend forks mainnet at the configured block.
+    // These contracts are NOT deployed fresh — they are the real
+    // mainnet contracts with years of accumulated state.
+    IBridgeEth bridgeEth;
+    IBridgePoly bridgePoly;
 
     function setUp() public {
-        bridgeEth = new BridgeEth();
-        bridgePoly = new BridgePoly();
+        // Fork-block addresses from chain registry config.
+        // Source paths are used ONLY for ABI artifacts, Slither,
+        // and storage layout — not for deployment.
+        bridgeEth = IBridgeEth(ETH_BRIDGE_ADDRESS);
+        bridgePoly = IBridgePoly(POLY_BRIDGE_ADDRESS);
     }
 
     /// @crosschain src=ethereum dst=polygon

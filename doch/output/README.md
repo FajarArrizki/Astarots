@@ -112,7 +112,7 @@ Raw tool output is preserved in `Evidence.raw` for each chain, with file hashes 
 ## JSON Output
 
 ```bash
-astarots probe --target src/BridgeEth.sol,src/BridgePoly.sol --chains eth,poly --output json
+astarots probe --target ethereum=src/BridgeEth.sol --target polygon=src/BridgePoly.sol --output json
 ```
 
 ```json

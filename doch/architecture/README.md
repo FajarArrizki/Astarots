@@ -98,7 +98,48 @@ The decomposer validates that the invariant IR is complete — missing correlati
 
 ### Chain Registry
 
-Manages per-chain configuration: RPC endpoints, **pinned fork block numbers**, mainnet contract addresses, and chain-specific tool settings. Each chain is registered with a unique alias and a fork block — the harness never deploys fresh contracts. It forks mainnet at the specified block and operates on the live state accumulated over years of protocol operation. Fork blocks must be archive-node accessible (historical state queries required).
+Manages per-chain configuration: RPC endpoints, **pinned fork block numbers**, mainnet contract addresses, and chain-specific tool settings. Each chain is registered with a unique alias and a fork block.
+
+### Fork Snapshot Coherence
+
+Choosing independent blocks for each chain does not guarantee a consistent cross-chain snapshot. Two chains may differ in wall-clock time, finality status, guardian-set epoch, observed Wormhole sequence number, upgrade epoch, or delivery cutoff. A **SnapshotSet** enforces coherence:
+
+```
+SnapshotSet:
+    snapshots: Map[ChainId, ForkSnapshot]
+    anchor_timestamp: int              # reference timestamp for cross-chain alignment
+    finality_policy: str               # "probabilistic" | "checkpoint" | "instant"
+    guardian_epoch: int                # active guardian set index at this snapshot
+    source_message_cutoff: int         # last Wormhole sequence emitted on source
+    consistency_proof: str             # how this set was validated as coherent
+```
+
+The set is validated: block hashes, state roots, target code hashes, and proxy implementation addresses are recorded per chain. A `consistency_proof` documents the methodology used to establish coherence (e.g., "blocks within 5-minute window; same guardian_set_index on both chains; Wormhole sequence gap ≤ 3").
+
+### Relay Dataset
+
+Wormhole messages are emitted as events on the source chain, then Guardians form signed VAAs off-chain. The destination chain receives VAAs via a relayer. The forked EVM state does **not** contain a list of emitted-but-undelivered VAAs. A separate **RelayDataset** artifact bridges this gap:
+
+```
+RelayDataset:
+    source_chain: ChainId
+    source_block_range: (int, int)
+    messages: list[RelayMessage]
+    indexed_by: str                    # "sequence" | "vaa_hash" | "emitter"
+    provenance: str                    # "indexed-logs" | "historical-vaas" | "relayer-api"
+    provenance_hash: str               # hash of source data for reproducibility
+
+RelayMessage:
+    emitter: str                       # contract address
+    sequence: int                      # Wormhole sequence number
+    payload: bytes                     # raw message payload
+    vaa_bytes: bytes                   # full signed VAA (if available from Guardian network)
+    vaa_hash: str                      # VAA hash for correlation
+    guardian_set_index: int            # guardian set epoch
+    destination_status: str            # "delivered" | "pending" | "expired" | "unknown"
+```
+
+Sources: indexed source-chain logs, historical signed VAAs from Guardian network API, destination consumption state, or pinned relayer API datasets (with content hashes for evidence integrity).
 
 ### Cross-Chain Message Coordinator
 
@@ -128,6 +169,29 @@ Maps tool names to adapter implementations. Each adapter exposes its capabilitie
 
 After all per-chain searches complete, the recombiner merges `SearchResult` structs and checks the original cross-chain invariant. It correlates per-chain candidates by the `correlation_key`, evaluates the cross-chain predicate, and produces `CrossChainEdgeCase` findings. A source-chain candidate with a valid-but-suspicious state combined with a destination-chain candidate may violate the cross-chain property even if neither chain's local invariant broke — this is where the deepest cross-chain edge cases emerge.
 
+### Actor & Privilege Model
+
+The scheduler can impersonate any address on a fork via `vm.prank`. Without constraints, this produces false positives — an "attacker" with governance privileges or unlimited balance is not a realistic threat. Every action in a call sequence carries an explicit actor:
+
+```
+Actor:
+    address: str                      # 0x...
+    role: str                         # "attacker" | "guardian" | "governance" | "relayer" | "user" | "admin"
+    provenance: str                   # "fork_state" | "generated" | "derived_from_event"
+    privilege_level: str              # "none" | "basic" | "operator" | "guardian" | "governance"
+    impersonation_allowed: bool       # may the scheduler impersonate this actor?
+    funding_method: str               # "from_fork_balance" | "deal" | "transfer_from_whale"
+```
+
+Findings are classified by the attacker model they require:
+- **permissionless** — any external actor with no special privileges
+- **compromised_guardian** — requires control of one or more guardian keys
+- **compromised_governance** — requires governance execution privileges
+- **privileged_operator** — requires operator/admin role
+- **state_only** — invariant violation that exists in the forked state without any attacker action
+
+Only `permissionless` findings represent true zero-privilege exploits. Other classifications document the trust assumptions under which the violation occurs.
+
 ### Report Engine
 
 Renders findings with per-chain trace annotations. Each call in a cross-chain attack sequence is labeled with the chain it executes on and the tool that discovered it. Output formats: console (for development) and JSON (for CI and programmatic consumption).
@@ -148,4 +212,4 @@ Renders findings with per-chain trace annotations. Each call in a cross-chain at
 
 **The harness operates on forked mainnet state, not fresh deploys.** All execution starts from a pinned mainnet block. The contracts are already deployed at known addresses with years of accumulated state. Constraint extraction reads real storage values, real guardian sets, real pending message queues. The search starts from the actual state of the protocol — not from an empty deployment. Fresh deploys are only used for unit-testing the harness itself, never for production probe runs.
 
-**The harness uses deterministic twin-state for replay, not vm.mockCall.** Cross-chain replay uses separate EVM state databases or Foundry multi-fork with pinned blocks, not string-based mock calls. Since the starting state is already a fork, replay is a fork-of-a-fork — fully deterministic and reproducible.
+**The harness uses deterministic twin-state for replay, not vm.mockCall.** Cross-chain replay creates fresh forks from the same RPC base blocks and replays the recorded `ActionTrace` + `EnvironmentTransitions`. This is not a "fork of an in-memory fork" — it is a deterministic replay from the same on-chain base state. Each tool replays the same trace independently from the same `BaseForkFingerprint`.

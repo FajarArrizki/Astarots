@@ -12,21 +12,35 @@ Each node in the search tree carries an immutable copy of the global state — n
 
 ```
 GlobalState:
-    chain_snapshots: Map[ChainId, Snapshot]   # immutable per-chain storage
-    pending_messages: OrderedQueue[Message]   # emitted, not yet delivered
-    trace: list[CrossChainStep]               # ordered causal execution trace
-    assumptions: list[Assumption]             # scope assumptions in effect
-    budget_used: int                          # states consumed so far
+    chain_snapshots: Map[ChainId, ForkSnapshot]   # per-chain fork state
+    pending_messages: OrderedQueue[Message]       # emitted, not yet delivered
+    trace: list[CrossChainStep]                   # ordered causal execution trace
+    assumptions: list[Assumption]                 # scope assumptions in effect
+    budget_used: int                              # states consumed so far
 
-Snapshot:
+ForkSnapshot:
     chain_id: ChainId
-    fork_block: int                          # pinned mainnet block this state was forked from
-    contract_states: Map[ContractId, Storage] # storage per contract (real mainnet values)
-    block_number: int                        # current block after probe steps
-    timestamp: int
+    base_block: int                        # pinned mainnet block
+    base_block_hash: str                   # canonical hash at pinned block
+    state_root: str                        # state root at pinned block
+    backend_handle: str                    # opaque handle (Echidna session, Foundry fork id)
+    overlay_id: int                        # snapshot/revert checkpoint within this branch
+    state_diff: list[SlotChange]           # only slots TOUCHED during this branch's execution
+    touched_slots_manifest: list[str]      # slot keys touched (for cross-tool projection)
+    emitted_logs: list[Event]              # logs emitted during this branch
+    block_number_delta: int                # blocks advanced from base
+    timestamp_delta: int                   # timestamp advanced from base
+
+SlotChange:
+    contract: str                          # contract address
+    slot: str                              # storage slot key
+    old_value: bytes32                     # value at base (lazy-loaded from RPC on first access)
+    new_value: bytes32                     # value after branch execution
+
+Mainnet RPCs do not support enumerating all contract storage. Echidna and Foundry fetch slots lazily on first access. Proxy contracts, mappings, dynamic arrays, and transitive calls make full-storage copies infeasible. Branch isolation uses EVM snapshot/revert at the backend level — each branch checkpoints its backend handle and applies a state diff. Cross-tool handoff uses deterministic `ActionTrace` + `BaseForkFingerprint` so each tool can replay the same trace from the same base, rather than sharing internal snapshot objects.
 ```
 
-When a branch expands, it copies the global state (structural sharing where possible) and applies the new step. Branches are isolated — a message delivered in one branch does not affect another.
+When a branch expands, it checkpoints the backend (EVM snapshot/revert or copy-on-write overlay) and applies the new step. Only the state diff and touched slots are tracked — storage is fetched lazily from the RPC base on first access, never fully enumerated. Branches are isolated — a message delivered in one branch does not affect another.
 
 ---
 
@@ -50,6 +64,18 @@ unified_search(targets, invariant, fork_blocks, max_depth=4, budget=200):
     deepest = None
     all_witnesses = []
     state_budget = budget
+
+    # STEP 0: Evaluate baseline invariant at the forked state.
+    # The invariant may already be violated at the fork block due to:
+    #   - cross-chain snapshot asynchrony
+    #   - in-flight messages not yet delivered
+    #   - incomplete relay dataset
+    #   - genuine historical state inconsistency
+    baseline = evaluate_baseline(
+        global_state=GlobalState.from_forks(targets, fork_blocks),
+        invariant=invariant,
+    )
+    # baseline.status: holds | violated | unobservable | inconclusive
 
     while frontier is not empty AND state_budget > 0:
         state = frontier.pop()
@@ -165,6 +191,7 @@ unified_search(targets, invariant, fork_blocks, max_depth=4, budget=200):
         state_budget -= 1
 
     return SearchResult(
+        baseline=baseline,
         witnesses=all_witnesses,
         deepest_edge=deepest,
         exhausted=(state_budget <= 0),
@@ -190,6 +217,7 @@ SearchState:
     sequence: list[Call]               # call sequence explored so far
     evidence: list[Evidence]           # tool outputs supporting this path
     depth: int                         # current depth in search tree
+    branch_id: str                     # unique lineage identifier for causal pairing
 ```
 
 ### WitnessState
@@ -201,6 +229,7 @@ WitnessState:
     snapshot: GlobalState              # full chain state at this point
     correlation_value: bytes32         # extracted via CorrelationExtractor
     chain: ChainId
+    branch_id: str                     # causal lineage — only witnesses on same lineage pair
     call_sequence: list[Call]
     constraints: list[Constraint]
     evidence: list[Evidence]
@@ -214,7 +243,8 @@ EdgeCase:
     depth: int
     witnesses: list[WitnessState]      # one per chain involved
     independently_confirmed: bool
-    evidence_strength: "observed" | "replayed" | "symbolically-confirmed"
+    evidence_strength: "observed" | "replayed" | "symbolically-confirmed" | "symbolically-confirmed-under-projected-state"
+    violation_source: "pre_existing_at_snapshot" | "introduced_by_trace" | "amplified_by_trace" | "inconclusive_due_to_missing_relay_data"
     impact: Impact
     chains: list[ChainId]
 ```
@@ -225,8 +255,14 @@ EdgeCase:
 SearchResult:
     witnesses: list[WitnessState]      # all recorded witnesses across chains
     deepest_edge: Optional[EdgeCase]   # deepest violation found, if any
+    baseline: BaselineResult           # invariant status at fork block before any probing
     exhausted: bool
     outcome: "violated" | "not_observed" | "inconclusive"
+
+BaselineResult:
+    status: "holds" | "violated" | "unobservable" | "inconclusive"
+    violation_kind: "pre_existing_at_snapshot" | "none"
+    reason: Optional[str]              # e.g. "cross-chain snapshot async — 3 messages in-flight"
 ```
 
 ### Constraint
@@ -256,40 +292,24 @@ Candidate:
 
 ## Cross-Chain Witness Correlation
 
-After the unified search completes, cross-chain violations are detected by correlating witnesses — not by Cartesian product of per-chain results:
+Cross-chain violations are evaluated against a **single** branch-local `GlobalState.snapshot`, not by pairing witnesses from different branches. Every witness carries a `snapshot` containing the full state of all chains at that point in the causal trace. The invariant is checked directly against that snapshot:
 
 ```
-find_cross_violations(witnesses, invariant):
-    # Group witnesses by correlation value
-    by_correlation: Map[bytes32, list[WitnessState]] = {}
-    for w in witnesses:
-        by_correlation[w.correlation_value].append(w)
-
-    violations = []
-    for corr_val, group in by_correlation.items():
-        # Need at least one witness per chain
-        chains_present = {w.chain for w in group}
-        if len(chains_present) < len(invariant.contexts):
-            continue
-
-        # Check cross-chain predicate against paired snapshots
-        for src in group:
-            if src.chain != invariant.source_chain:
-                continue
-            for dst in group:
-                if dst.chain != invariant.destination_chain:
-                    continue
-                if not invariant.cross_check(src.snapshot, dst.snapshot):
-                    violations.append(CrossChainViolation(
-                        source_witness=src,
-                        dest_witness=dst,
-                        correlation_value=corr_val,
-                    ))
-
-    return violations
+for witness in reachable_witnesses:
+    if invariant.observation_policy.ready(witness.snapshot):
+        if not invariant.check(witness.snapshot):
+            violations.append(witness)
 ```
 
-This only pairs witnesses that share a correlation value and were actually reached during the same unified search — no combination of causally impossible states.
+Two witnesses that share a correlation value but come from **different** branches cannot be paired — they represent causally divergent paths. Only witnesses on the **same causal lineage** (shared `branch_id` and ancestor relation) can be combined. If cross-chain violations must be detected from paired witnesses, each `SearchState` records:
+
+```
+SearchState:
+    branch_id: str                     # unique lineage identifier
+    parent_branch_id: Optional[str]    # for ancestor tracking
+```
+
+Witnesses with the same `branch_id` share a causal trace and can be paired safely. Witnesses from different branches never pair.
 
 ---
 
