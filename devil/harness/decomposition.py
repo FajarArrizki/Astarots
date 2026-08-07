@@ -1,40 +1,48 @@
-"""Decompose and recombine cross-chain invariant evidence."""
+"""Derive local transition monitors without inventing invariant semantics."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from devil.core.types import ChainId, WitnessState
-from devil.invariant.ir import Binding, Context, CrossChainInvariant, TransitionPredicate
+from devil.core.types import ChainId
+from devil.invariant.ir import (
+    Binding,
+    Context,
+    CrossChainInvariant,
+    Property,
+    TransitionPredicate,
+)
 
 
 @dataclass(frozen=True)
 class SubInvariant:
-    """Per-chain monitor retaining the global correlation contract."""
-
     id: str
     chain: ChainId
     contexts: tuple[Context, ...]
     transitions: tuple[TransitionPredicate, ...]
     bindings: tuple[Binding, ...]
-    correlation_key: str
+    correlation_extractor_id: str
+    property: Property
 
 
 def decompose(invariant: CrossChainInvariant) -> tuple[SubInvariant, ...]:
-    """Create one monitor per configured chain without losing cross-chain metadata."""
+    """Materialize one local monitor bundle per chain while preserving global property."""
     result: list[SubInvariant] = []
-    for chain, contexts in sorted(invariant.contexts.items(), key=lambda item: item[0].value):
-        context_names = {context.contract for context in contexts}
+    chains = sorted({context.chain_id for context in invariant.contexts.values()}, key=str)
+    for chain in chains:
+        contexts = tuple(
+            context for context in invariant.contexts.values() if context.chain_id is chain
+        )
+        context_ids = {context.context_id for context in contexts}
         transitions = tuple(
             transition
             for transition in invariant.transition_predicates
-            if transition.chain_id is chain and transition.contract in context_names
+            if transition.context_id in context_ids
         )
         bindings = tuple(
             binding
             for binding in invariant.bindings
-            if binding.source.startswith(f"{chain.value}.")
-            or binding.destination.startswith(f"{chain.value}.")
+            if any(source.context_id in context_ids for source in binding.sources)
         )
         result.append(
             SubInvariant(
@@ -43,22 +51,8 @@ def decompose(invariant: CrossChainInvariant) -> tuple[SubInvariant, ...]:
                 contexts=contexts,
                 transitions=transitions,
                 bindings=bindings,
-                correlation_key=invariant.correlation_key,
+                correlation_extractor_id=invariant.correlation_extractor_id,
+                property=invariant.property,
             )
         )
     return tuple(result)
-
-
-def recombine(witnesses: tuple[WitnessState, ...]) -> tuple[WitnessState, ...]:
-    """Keep only witness segments on one causal branch and correlation identity."""
-    if not witnesses:
-        return ()
-    by_key: dict[tuple[str, str], list[WitnessState]] = {}
-    for witness in witnesses:
-        by_key.setdefault((witness.branch_id, witness.correlation_value), []).append(witness)
-    return tuple(
-        witness
-        for key in sorted(by_key)
-        if len({item.chain for item in by_key[key]}) > 1
-        for witness in sorted(by_key[key], key=lambda item: (item.chain.value, item.call_sequence))
-    )

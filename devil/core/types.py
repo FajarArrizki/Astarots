@@ -1,41 +1,29 @@
-"""Fundamental types for cross-chain invariant testing harness.
-
-All types are frozen (immutable) dataclasses. The harness operates on
-branch-local copies — structural sharing is used where possible.
-"""
+"""Immutable kernel types for cross-chain mainnet-fork campaigns."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any
-
-# ── Chain & Contract Identification ──────────────────────────────────────────
 
 
 class ChainId(StrEnum):
-    """Chain identifier matching chain registry aliases."""
-
     ETHEREUM = "ethereum"
     POLYGON = "polygon"
     ARBITRUM = "arbitrum"
+    OPTIMISM = "optimism"
     FANTOM = "fantom"
 
 
-# ── Outcomes ─────────────────────────────────────────────────────────────────
-
-
 class Verdict(StrEnum):
-    """What was observed about the invariant."""
-
     VIOLATED = "violated"
     NOT_OBSERVED = "not_observed"
     INCONCLUSIVE = "inconclusive"
 
 
 class EvidenceStrength(StrEnum):
-    """How well a finding is supported."""
-
     OBSERVED = "observed"
     REPLAYED = "replayed"
     SYMBOLICALLY_CONFIRMED = "symbolically_confirmed"
@@ -43,8 +31,6 @@ class EvidenceStrength(StrEnum):
 
 
 class Outcome(StrEnum):
-    """Typed outcome from a tool invocation."""
-
     SUCCESS = "success"
     COUNTEREXAMPLE = "counterexample"
     UNSAT_UNDER_BOUNDS = "unsat_under_bounds"
@@ -55,8 +41,6 @@ class Outcome(StrEnum):
 
 
 class ViolationSource(StrEnum):
-    """Where a violation originated."""
-
     PRE_EXISTING_AT_SNAPSHOT = "pre_existing_at_snapshot"
     INTRODUCED_BY_TRACE = "introduced_by_trace"
     AMPLIFIED_BY_TRACE = "amplified_by_trace"
@@ -64,184 +48,100 @@ class ViolationSource(StrEnum):
 
 
 class RelayMode(StrEnum):
-    """How cross-chain relay signatures are handled."""
-
-    HISTORICAL_AUTHENTIC = "historical_authentic"
-    PROTOCOL_VALID_SYNTHETIC = "protocol_valid_synthetic"
-    MODELED_RELAY = "modeled_relay"
-    RAW_PAYLOAD = "raw_payload"
+    HISTORICAL_AUTHENTIC = "historical-authentic"
+    PROTOCOL_VALID_SYNTHETIC = "protocol-valid-synthetic"
+    MODELED_RELAY = "modeled-relay"
+    RAW_PAYLOAD = "raw-payload"
 
 
 class AttackerModel(StrEnum):
-    """Privilege level required to exploit a finding."""
-
     PERMISSIONLESS = "permissionless"
-    COMPROMISED_GUARDIAN = "compromised_guardian"
+    COMPROMISED_SIGNER = "compromised_signer"
     COMPROMISED_GOVERNANCE = "compromised_governance"
     PRIVILEGED_OPERATOR = "privileged_operator"
     STATE_ONLY = "state_only"
 
 
 class BaselineStatus(StrEnum):
-    """Invariant status at the fork block before any probing."""
-
     HOLDS = "holds"
+    PENDING = "pending"
     VIOLATED = "violated"
     UNOBSERVABLE = "unobservable"
     INCONCLUSIVE = "inconclusive"
 
 
-# ── Core Types ───────────────────────────────────────────────────────────────
+class ExecutionStatus(StrEnum):
+    APPLIED = "applied"
+    REVERTED = "reverted"
+
+
+class RevertKind(StrEnum):
+    EVM_REVERT = "evm_revert"
+    OUT_OF_GAS = "out_of_gas"
+
+
+class MessageStatus(StrEnum):
+    EMITTED = "emitted"
+    SOURCE_FINALIZED = "source_finalized"
+    RELAY_ELIGIBLE = "relay_eligible"
+    DELIVERED = "delivered"
+    CONSUMED = "consumed"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
+class RelayAction(StrEnum):
+    FINALIZE = "finalize"
+    MAKE_ELIGIBLE = "make_eligible"
+    DELIVER = "deliver"
+    CONSUME = "consume"
+    REJECT = "reject"
+    EXPIRE = "expire"
+
+
+class EnvironmentReason(StrEnum):
+    FINALITY = "finality"
+    RELAY_DELAY = "relay_delay"
+    EXPIRY = "expiry"
+    OBSERVATION = "observation"
+    LIVENESS_DEADLINE = "liveness_deadline"
+
+
+class LivenessStatus(StrEnum):
+    ACTIVE = "active"
+    SATISFIED = "satisfied"
+    VIOLATED = "violated"
+    INCONCLUSIVE = "inconclusive"
+
+
+def deep_freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: deep_freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(deep_freeze(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(deep_freeze(item) for item in value)
+    return value
+
+
+def frozen_mapping[K, V](value: Mapping[K, V] | None = None) -> Mapping[K, V]:
+    """Return an immutable defensive deep copy of a mapping."""
+    return MappingProxyType({key: deep_freeze(item) for key, item in (value or {}).items()})
 
 
 @dataclass(frozen=True)
 class Constraint:
-    """A named condition on contract state or execution context."""
-
-    kind: str  # FUNCTION | STATE_VAR | TIMING | EXTERNAL_CALL | ACCESS | CROSS_CHAIN
+    kind: str
     target: str
     value: Any
     chain: ChainId
-    source: str  # which tool produced this constraint
-
-
-@dataclass(frozen=True)
-class Call:
-    """A single function call in an execution sequence."""
-
-    function_signature: str
-    args: tuple[Any, ...] = ()
-    chain: ChainId | None = None
-    source: str | None = None  # which tool discovered this call
-
-
-@dataclass(frozen=True)
-class Evidence:
-    """Tool output supporting a candidate or finding."""
-
-    tool: str
-    outcome: Outcome
-    raw: str  # raw tool output (or path to artifact)
-    raw_hash: str | None = None
-    trace: str | None = None
-
-
-@dataclass(frozen=True)
-class Candidate:
-    """A ranked result from probing at a given search state."""
-
-    target_function: str
-    call_sequence: tuple[Call, ...] = ()
-    pre_conditions: tuple[Constraint, ...] = ()
-    suspicion: float = 0.0  # 0.0–1.0
-    evidence: Evidence | None = None
-    chain: ChainId | None = None
-
-
-@dataclass(frozen=True)
-class SlotChange:
-    """A single storage slot change within a branch."""
-
-    contract: str
-    slot: str
-    old_value: str | None = None  # bytes32 hex; None = not yet fetched
-    new_value: str = "0x"  # bytes32 hex
-
-
-@dataclass(frozen=True)
-class ForkSnapshot:
-    """Forked mainnet state for one chain within a branch."""
-
-    chain_id: ChainId
-    base_block: int
-    base_block_hash: str = ""
-    state_root: str = ""
-    backend_handle: str = ""  # opaque (Echidna session id, Foundry fork id)
-    overlay_id: int = 0
-    state_diff: tuple[SlotChange, ...] = ()
-    touched_slots: tuple[str, ...] = ()  # manifest of touched slot keys
-    emitted_logs: tuple[Any, ...] = ()
-    block_number_delta: int = 0
-    timestamp_delta: int = 0
-
-
-@dataclass(frozen=True)
-class GlobalState:
-    """Branch-local immutable copy of the full cross-chain state."""
-
-    chain_snapshots: dict[ChainId, ForkSnapshot] = field(default_factory=dict)
-    pending_messages: tuple[Any, ...] = ()  # Message objects, frozen
-    trace: tuple[Any, ...] = ()  # CrossChainStep objects, frozen
-    assumptions: tuple[str, ...] = ()
-    budget_used: int = 0
-
-    def with_snapshot(self, chain_id: ChainId, snapshot: ForkSnapshot) -> GlobalState:
-        """Return a new GlobalState with an updated snapshot for a chain."""
-        snapshots = dict(self.chain_snapshots)
-        snapshots[chain_id] = snapshot
-        return GlobalState(
-            chain_snapshots=snapshots,
-            pending_messages=self.pending_messages,
-            trace=self.trace,
-            assumptions=self.assumptions,
-            budget_used=self.budget_used,
-        )
-
-
-@dataclass(frozen=True)
-class SearchState:
-    """A node in the unified beam search frontier."""
-
-    global_state: GlobalState
-    chain_context: ChainId
-    constraints: tuple[Constraint, ...] = ()
-    sequence: tuple[Call, ...] = ()
-    evidence: tuple[Evidence, ...] = ()
-    depth: int = 0
-    branch_id: str = ""  # unique lineage identifier
-
-
-@dataclass(frozen=True)
-class WitnessState:
-    """A recorded intermediate state with correlation value."""
-
-    snapshot: GlobalState
-    correlation_value: str  # bytes32 hex
-    chain: ChainId
-    branch_id: str = ""
-    call_sequence: tuple[Call, ...] = ()
-    constraints: tuple[Constraint, ...] = ()
-    evidence: tuple[Evidence, ...] = ()
-    status: str = "reachable"  # "reachable" | "inconclusive"
-
-
-@dataclass(frozen=True)
-class BaselineResult:
-    """Invariant evaluation result at the fork block before probing."""
-
-    status: BaselineStatus = BaselineStatus.HOLDS
-    reason: str = ""
-
-
-@dataclass(frozen=True)
-class EdgeCase:
-    """A fully specified cross-chain attack vector."""
-
-    depth: int
-    witnesses: tuple[WitnessState, ...] = ()
-    independently_confirmed: bool = False
-    evidence_strength: EvidenceStrength = EvidenceStrength.OBSERVED
-    violation_source: ViolationSource = ViolationSource.INTRODUCED_BY_TRACE
-    impact: str = ""  # CRITICAL | HIGH | MEDIUM | LOW
-    chains: tuple[ChainId, ...] = ()
-    description: str = ""
+    source: str
+    provenance_hash: str = ""
 
 
 @dataclass(frozen=True)
 class Actor:
-    """Who performs an action in a call sequence."""
-
-    address: str  # 0x...
+    address: str
     role: str = "attacker"
     provenance: str = "fork_state"
     privilege_level: str = "none"
@@ -250,61 +150,340 @@ class Actor:
 
 
 @dataclass(frozen=True)
-class Impact:
-    """The consequence of an edge case violation."""
+class ActorPolicy:
+    id: str
+    policy_hash: str
+    actors: tuple[Actor, ...] = ()
 
-    severity: str = ""  # CRITICAL | HIGH | MEDIUM | LOW
-    description: str = ""
-    affected_chains: tuple[ChainId, ...] = ()
-    attacker_model: AttackerModel = AttackerModel.PERMISSIONLESS
+    def permits(self, actor: Actor) -> bool:
+        return actor.impersonation_allowed and any(
+            configured.address.lower() == actor.address.lower()
+            and configured.role == actor.role
+            and configured.privilege_level == actor.privilege_level
+            for configured in self.actors
+        )
 
 
-# ── Relay & Message Types ────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class Call:
+    function_signature: str
+    args: tuple[Any, ...] = ()
+    chain: ChainId | None = None
+    context_id: str = ""
+    calldata: str = ""
+    value: int = 0
+    actor: Actor | None = None
+    gas_limit: int = 0
+    source: str | None = None
+
+
+@dataclass(frozen=True)
+class RelayTransition:
+    message_id: str
+    action: RelayAction
+    from_status: MessageStatus
+    to_status: MessageStatus
+    source_chain: ChainId
+    destination_chain: ChainId
+    relay_mode: RelayMode
+    policy_ref: str
+
+
+@dataclass(frozen=True)
+class EnvironmentTransition:
+    chain: ChainId
+    target_block: int
+    target_timestamp: int
+    reason: EnvironmentReason
+    policy_ref: str
+
+
+CrossChainStep = Call | RelayTransition | EnvironmentTransition
+
+
+@dataclass(frozen=True)
+class Evidence:
+    tool: str
+    outcome: Outcome
+    raw: str
+    raw_hash: str | None = None
+    trace: str | None = None
+    artifact_hashes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Candidate:
+    target_function: str
+    call_sequence: tuple[CrossChainStep, ...] = ()
+    pre_conditions: tuple[Constraint, ...] = ()
+    suspicion: float = 0.0
+    evidence: Evidence | None = None
+    chain: ChainId | None = None
+    actor: Actor | None = None
+
+
+@dataclass(frozen=True)
+class SlotChange:
+    contract: str
+    slot: str
+    old_value: str | None = None
+    new_value: str = "0x"
+
+
+@dataclass(frozen=True)
+class CodeChange:
+    context_id: str
+    old_code_hash: str
+    new_code_hash: str
+
+
+@dataclass(frozen=True)
+class Event:
+    context_id: str
+    signature: str
+    fields: Mapping[str, Any] = field(default_factory=dict)
+    transaction_hash: str = ""
+    log_index: int = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "fields", frozen_mapping(self.fields))
+
+
+@dataclass(frozen=True)
+class ForkSnapshot:
+    chain_id: ChainId
+    base_block: int
+    base_block_hash: str = ""
+    state_root: str = ""
+    base_timestamp: int = 0
+    backend_handle: str = ""
+    overlay_id: int = 0
+    state_diff: tuple[SlotChange, ...] = ()
+    code_diff: tuple[CodeChange, ...] = ()
+    touched_slots: tuple[str, ...] = ()
+    emitted_logs: tuple[Event, ...] = ()
+    block_number_delta: int = 0
+    timestamp_delta: int = 0
+
+    @property
+    def block_number(self) -> int:
+        return self.base_block + self.block_number_delta
+
+    @property
+    def timestamp(self) -> int:
+        return self.base_timestamp + self.timestamp_delta
 
 
 @dataclass(frozen=True)
 class RelayMessage:
-    """A single cross-chain relay message with provenance identity."""
-
     emitter: str
     sequence: int
-    payload: str = ""  # bytes hex
-    vaa_bytes: str = ""  # bytes hex
-    vaa_hash: str = ""
-    guardian_set_index: int = 0
-    destination_status: str = "unknown"  # delivered | pending | expired | unknown
-    message_id: str = ""
-    source_event_hash: str = ""
+    source_chain: ChainId
+    destination_chain: ChainId
+    destination_context: str
+    payload: str = ""
+    payload_hash: str = ""
+    attestation: str = ""
     attestation_hash: str = ""
+    message_id: str = ""
+    correlation_value: str = ""
+    source_block_number: int = 0
+    source_block_hash: str = ""
+    source_log_index: int = 0
+    source_event_hash: str = ""
+    emitted_timestamp: int = 0
+    guardian_set_index: int = 0
+    destination_status: str = "unknown"
+    status_evidence_hash: str = ""
+    protocol_metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "protocol_metadata", frozen_mapping(self.protocol_metadata))
 
     @property
     def identity(self) -> str:
         return self.message_id or f"{self.emitter}:{self.sequence}"
 
+    @property
+    def vaa_bytes(self) -> str:
+        return self.attestation
+
+    @property
+    def vaa_hash(self) -> str:
+        return self.attestation_hash
+
 
 @dataclass(frozen=True)
 class RelayDataset:
-    """Collection of cross-chain relay messages with provenance."""
-
-    source_chain: ChainId
-    source_block_range: tuple[int, int] = (0, 0)
+    schema_version: str
+    dataset_hash: str
+    protocol: str
+    source_block_ranges: Mapping[ChainId, tuple[int, int]]
     messages: tuple[RelayMessage, ...] = ()
-    indexed_by: str = "sequence"
-    provenance: str = ""  # indexed-logs | historical-vaas | relayer-api
+    provenance: str = ""
     provenance_hash: str = ""
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source_block_ranges", frozen_mapping(self.source_block_ranges))
+        identities = [message.identity for message in self.messages]
+        if len(identities) != len(set(identities)):
+            raise ValueError("relay dataset contains duplicate message identities")
 
-# ── Search Result ────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class RelayTransitionRecord:
+    action: RelayAction
+    from_status: MessageStatus
+    to_status: MessageStatus
+    block_number: int
+    timestamp: int
+    evidence_hash: str = ""
+
+
+@dataclass(frozen=True)
+class MessageState:
+    envelope: RelayMessage
+    status: MessageStatus = MessageStatus.EMITTED
+    transition_history: tuple[RelayTransitionRecord, ...] = ()
+
+
+@dataclass(frozen=True)
+class LivenessObligation:
+    id: str
+    binding_key: tuple[Any, ...]
+    correlation_value: str | None
+    clock_chain: ChainId
+    start_block: int
+    start_timestamp: int
+    deadline_value: int
+    deadline_unit: str
+    status: LivenessStatus = LivenessStatus.ACTIVE
+    evidence: tuple[Evidence, ...] = ()
+
+
+@dataclass(frozen=True)
+class GlobalState:
+    chain_snapshots: Mapping[ChainId, ForkSnapshot] = field(default_factory=dict)
+    snapshot_set_id: str = ""
+    pending_messages: Mapping[str, MessageState] = field(default_factory=dict)
+    relay_dataset_hash: str = ""
+    observation_set_hash: str = ""
+    relay_policy_hash: str = ""
+    relay_mode: RelayMode = RelayMode.MODELED_RELAY
+    actor_policy: ActorPolicy | None = None
+    trace: tuple[CrossChainStep, ...] = ()
+    assumptions: tuple[Any, ...] = ()
+    liveness_obligations: Mapping[str, LivenessObligation] = field(default_factory=dict)
+    observed_values: Mapping[str, Any] = field(default_factory=dict)
+    budget_used: int = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "chain_snapshots", frozen_mapping(self.chain_snapshots))
+        object.__setattr__(self, "pending_messages", frozen_mapping(self.pending_messages))
+        object.__setattr__(self, "liveness_obligations", frozen_mapping(self.liveness_obligations))
+        object.__setattr__(self, "observed_values", frozen_mapping(self.observed_values))
+
+    def with_snapshot(self, chain_id: ChainId, snapshot: ForkSnapshot) -> GlobalState:
+        snapshots = dict(self.chain_snapshots)
+        snapshots[chain_id] = snapshot
+        return replace(self, chain_snapshots=snapshots)
+
+    def with_messages(self, messages: Mapping[str, MessageState]) -> GlobalState:
+        return replace(self, pending_messages=messages)
+
+    def with_observed_values(self, values: Mapping[str, Any]) -> GlobalState:
+        return replace(self, observed_values=values)
+
+
+@dataclass(frozen=True)
+class SearchState:
+    global_state: GlobalState
+    chain_context: ChainId
+    constraints: tuple[Constraint, ...] = ()
+    sequence: tuple[CrossChainStep, ...] = ()
+    evidence: tuple[Evidence, ...] = ()
+    depth: int = 0
+    branch_id: str = "root"
+    parent_branch_id: str | None = None
+
+
+@dataclass(frozen=True)
+class WitnessState:
+    snapshot: GlobalState
+    correlation_value: str = ""
+    chain: ChainId = ChainId.ETHEREUM
+    branch_id: str = ""
+    parent_branch_id: str | None = None
+    call_sequence: tuple[CrossChainStep, ...] = ()
+    constraints: tuple[Constraint, ...] = ()
+    evidence: tuple[Evidence, ...] = ()
+    status: str = "reachable"
+
+
+@dataclass(frozen=True)
+class BaselineResult:
+    status: BaselineStatus = BaselineStatus.HOLDS
+    reason: str = ""
+    violation_source: ViolationSource | None = None
+
+
+@dataclass(frozen=True)
+class Impact:
+    severity: str = ""
+    description: str = ""
+    affected_chains: tuple[ChainId, ...] = ()
+    attacker_model: AttackerModel = AttackerModel.PERMISSIONLESS
+
+
+@dataclass(frozen=True)
+class EdgeCase:
+    depth: int
+    witness: WitnessState | None = None
+    confirmations: tuple[Any, ...] = ()
+    segment_strengths: Mapping[str, EvidenceStrength] = field(default_factory=dict)
+    aggregate_strength: EvidenceStrength = EvidenceStrength.OBSERVED
+    aggregation_rule: str = "weakest-full-trace-segment"
+    violated_clauses: tuple[str, ...] = ()
+    violation_source: ViolationSource = ViolationSource.INTRODUCED_BY_TRACE
+    impact: Impact = field(default_factory=Impact)
+    chains: tuple[ChainId, ...] = ()
+    description: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "segment_strengths", frozen_mapping(self.segment_strengths))
+
+    @property
+    def evidence_strength(self) -> EvidenceStrength:
+        return self.aggregate_strength
+
+    @property
+    def witnesses(self) -> tuple[WitnessState, ...]:
+        return (self.witness,) if self.witness is not None else ()
+
+
+@dataclass(frozen=True)
+class CanonicalExecutionResult:
+    outcome: Outcome
+    execution_status: ExecutionStatus | None = None
+    revert_data: str | None = None
+    revert_kind: RevertKind | None = None
+    global_state: GlobalState | None = None
+    events: tuple[Event, ...] = ()
+    constraints: tuple[Constraint, ...] = ()
+    evidence: tuple[Evidence, ...] = ()
+    impact: Impact | None = None
+    reason: str = ""
 
 
 @dataclass(frozen=True)
 class SearchResult:
-    """Complete result from a unified beam search campaign."""
-
     witnesses: tuple[WitnessState, ...] = ()
+    edges: tuple[EdgeCase, ...] = ()
     deepest_edge: EdgeCase | None = None
     baseline: BaselineResult = field(default_factory=BaselineResult)
+    budget_exhausted: bool = False
     exhausted: bool = False
     outcome: Verdict = Verdict.NOT_OBSERVED
     budget_used: int = 0
     budget_total: int = 200
+    incomplete_outcomes: tuple[Outcome, ...] = ()

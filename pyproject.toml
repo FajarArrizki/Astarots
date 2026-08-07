@@ -1,13 +1,20 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
 [project]
 name = "astarots"
 version = "0.1.0"
 description = "Cross-chain invariant testing harness — unified beam search over Echidna, Halmos, and Slither"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["tomlkit>=0.13.3"]
 
 [project.scripts]
 astarots = "devil.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["devil"]
 
 [dependency-groups]
 dev = [

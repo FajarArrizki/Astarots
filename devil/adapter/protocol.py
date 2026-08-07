@@ -1,35 +1,30 @@
-"""Adapter protocol — uniform interface for tool adapters.
-
-Each adapter wraps one external analysis tool. The harness calls
-adapters through this protocol — never calls tools directly.
-"""
+"""Capability-gated, serialized adapter boundary and normalized result envelope."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from devil.core.snapshot import BaseForkFingerprint
 from devil.core.types import (
     Call,
     Candidate,
     ChainId,
     Constraint,
+    CrossChainStep,
+    Event,
     Evidence,
-    ForkSnapshot,
-    GlobalState,
     Outcome,
-    WitnessState,
+    SlotChange,
+    frozen_mapping,
 )
-
-# ── Capabilities ─────────────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
 class ToolCapabilities:
-    """Declared capabilities of a tool adapter."""
-
     name: str
     static_analysis: bool = False
     stateful_fuzzing: bool = False
@@ -42,8 +37,6 @@ class ToolCapabilities:
 
 @dataclass(frozen=True)
 class ArtifactRef:
-    """Content-addressed reference to a normalized tool artifact."""
-
     kind: str
     digest: str
     path: str = ""
@@ -51,16 +44,37 @@ class ArtifactRef:
 
 @dataclass(frozen=True)
 class Diagnostic:
-    """Structured tool diagnostic retained alongside normalized output."""
-
     message: str
+    code: str = ""
     severity: str = "warning"
 
 
 @dataclass(frozen=True)
-class StaticHint:
-    """Cross-chain-relevant static finding used to seed dynamic probing."""
+class ToolRunResult[T]:
+    outcome: Outcome
+    value: T | None = None
+    evidence: tuple[Evidence, ...] = ()
+    artifacts: tuple[ArtifactRef, ...] = ()
+    diagnostics: tuple[Diagnostic, ...] = ()
+    bounds: Mapping[str, Any] | None = None
 
+    def __post_init__(self) -> None:
+        if self.bounds is not None:
+            object.__setattr__(self, "bounds", frozen_mapping(self.bounds))
+        if (
+            self.outcome in {Outcome.TIMEOUT, Outcome.TOOL_ERROR, Outcome.UNSUPPORTED}
+            and not self.diagnostics
+        ):
+            raise ValueError(f"{self.outcome.value} result requires a diagnostic")
+
+
+def artifact_digest(payload: Any) -> str:
+    encoded = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True)
+class StaticHint:
     context_id: str
     selector: str
     kind: str
@@ -71,44 +85,92 @@ class StaticHint:
 
 
 @dataclass(frozen=True)
-class ToolRunResult[T]:
-    """Uniform typed result envelope for every adapter operation."""
-
-    outcome: Outcome
-    value: T | None = None
-    evidence: tuple[Evidence, ...] = ()
-    artifacts: tuple[ArtifactRef, ...] = ()
-    diagnostics: tuple[Diagnostic, ...] = ()
-    bounds: dict[str, Any] | None = None
-
-
-def artifact_digest(payload: Any) -> str:
-    encoded = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":")).encode()
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
-
-
-# ── Execution Result ─────────────────────────────────────────────────────────
+class MaterializedSlot:
+    context_id: str
+    address: str
+    slot: str
+    value: str
 
 
 @dataclass(frozen=True)
-class ExecutionResult:
-    """Result of executing a concrete call sequence."""
-
-    reachable: bool
-    outcome: Outcome = Outcome.SUCCESS
-    revert_reason: str = ""
-    before_snapshot: ForkSnapshot | None = None
-    after_snapshot: ForkSnapshot | None = None
-    events: tuple[dict, ...] = ()  # emitted events
-    correlation_value: str = ""  # bytes32 hex, if a cross-chain event was emitted
+class MaterializedCode:
+    context_id: str
+    address: str
+    bytecode: str
+    code_hash: str
 
 
-# ── Adapter Protocol ─────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class StateManifest:
+    slots: tuple[MaterializedSlot, ...] = ()
+    code: tuple[MaterializedCode, ...] = ()
+
+
+@dataclass(frozen=True)
+class ChainProjection:
+    chain_id: ChainId
+    base_fingerprint: BaseForkFingerprint
+    materialized_state: StateManifest
+    relevant_message_ids: tuple[str, ...] = ()
+    block_number_delta: int = 0
+    timestamp_delta: int = 0
+    assumptions: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ProjectionManifest:
+    chain: ChainId
+    target_context: str
+    target_address: str
+    state: StateManifest
+    block_number: int
+    timestamp: int
+    omitted_state: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "chain": self.chain.value,
+            "target_context": self.target_context,
+            "target_address": self.target_address,
+            "slots": [vars(item) for item in self.state.slots],
+            "code": [vars(item) for item in self.state.code],
+            "block_number": self.block_number,
+            "timestamp": self.timestamp,
+            "omitted_state": list(self.omitted_state),
+        }
+
+
+@dataclass(frozen=True)
+class WitnessProjection:
+    chain_projection: ChainProjection
+    trace_segment: tuple[CrossChainStep, ...]
+    violated_clause: str
+    projection_manifest: ProjectionManifest
+
+
+@dataclass(frozen=True)
+class ReplayResult:
+    applied: bool
+    state_diff: tuple[SlotChange, ...] = ()
+    events: tuple[Event, ...] = ()
+    revert_data: str = ""
+
+
+ExecutionResult = ReplayResult
+
+
+@dataclass(frozen=True)
+class BoundedConfirmation:
+    reproduced: bool
+    projection_manifest_hash: str
+    assumptions: tuple[str, ...]
+    omitted_state: tuple[str, ...]
+
+
+ProbeArtifact = StaticHint | Candidate | BoundedConfirmation
 
 
 class ToolAdapter(Protocol):
-    """Interface every tool adapter must implement."""
-
     capabilities: ToolCapabilities
 
     def probe(
@@ -116,51 +178,94 @@ class ToolAdapter(Protocol):
         target: str,
         invariant_id: str,
         constraints: tuple[Constraint, ...],
-        global_state: GlobalState,
+        projection: ChainProjection,
         chain: ChainId,
-    ) -> Outcome:
-        """Run the tool in exploration mode on one chain.
-
-        Returns a typed Outcome. On SUCCESS or COUNTEREXAMPLE, the
-        outcome carries candidate data (via the adapter's internal
-        result store).
-        """
-        ...
+        **options: Any,
+    ) -> ToolRunResult[list[ProbeArtifact]]: ...
 
     def execute(
         self,
         target: str,
-        sequence: tuple[Call, ...],
-        constraints: tuple[Constraint, ...],
+        trace: tuple[CrossChainStep, ...],
+        base_fingerprint: BaseForkFingerprint,
         chain: ChainId,
-    ) -> ExecutionResult:
-        """Execute a concrete call sequence on one chain."""
-        ...
+        **options: Any,
+    ) -> ToolRunResult[ReplayResult]: ...
 
     def confirm(
         self,
         target: str,
-        witness: WitnessState,
+        witness_projection: WitnessProjection,
         chain: ChainId,
-    ) -> Outcome:
-        """Verify a witness found by another tool.
-
-        Must use a different analysis method than the original probe.
-        """
-        ...
-
-
-# ── Artifact Registry ────────────────────────────────────────────────────────
+        **options: Any,
+    ) -> ToolRunResult[BoundedConfirmation]: ...
 
 
 @dataclass
 class ArtifactStore:
-    """In-memory store for tool exchange artifacts during a campaign."""
-
-    static_hints: list[tuple[str, float]] = field(default_factory=list)
-    seed_corpus: list[dict] = field(default_factory=list)
-    candidate_traces: list[Candidate] = field(default_factory=list)
-    constraint_sets: list[tuple[Constraint, ...]] = field(default_factory=list)
-    replay_results: list[ExecutionResult] = field(default_factory=list)
-    confirmations: list[Evidence] = field(default_factory=list)
+    values: dict[str, object] = field(default_factory=dict)
     diagnostics: list[str] = field(default_factory=list)
+
+    def put(self, value: object) -> ArtifactRef:
+        digest = artifact_digest(value)
+        self.values[digest] = value
+        return ArtifactRef(type(value).__name__, digest)
+
+    def get(self, digest: str) -> object:
+        try:
+            return self.values[digest]
+        except KeyError as exc:
+            raise KeyError(f"unknown artifact {digest}") from exc
+
+
+def candidate_from_hint(hint: StaticHint, chain: ChainId) -> Candidate:
+    """Convert only selectors already represented by a validated static hint."""
+    return Candidate(
+        target_function=hint.selector,
+        call_sequence=(
+            Call(
+                hint.selector,
+                chain=chain,
+                context_id=hint.context_id,
+                source=hint.producer,
+            ),
+        ),
+        pre_conditions=hint.constraints,
+        suspicion=hint.suspicion,
+        chain=chain,
+    )
+
+
+def project_chain(
+    state: Any,
+    base_fingerprint: BaseForkFingerprint,
+    chain: ChainId,
+    *,
+    code: tuple[MaterializedCode, ...] = (),
+) -> ChainProjection:
+    """Serialize one branch's future-relevant chain state for a tool."""
+    snapshot = state.chain_snapshots[chain]
+    slots = tuple(
+        MaterializedSlot(change.contract, change.contract, change.slot, change.new_value)
+        for change in snapshot.state_diff
+    )
+    relevant = tuple(
+        sorted(
+            identity
+            for identity, message in state.pending_messages.items()
+            if chain
+            in {
+                message.envelope.source_chain,
+                message.envelope.destination_chain,
+            }
+        )
+    )
+    return ChainProjection(
+        chain,
+        base_fingerprint,
+        StateManifest(slots, code),
+        relevant,
+        snapshot.block_number_delta,
+        snapshot.timestamp_delta,
+        tuple(str(item) for item in state.assumptions),
+    )
