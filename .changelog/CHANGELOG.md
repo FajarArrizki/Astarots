@@ -117,3 +117,20 @@ devil/
 - [ ] Implement the Echidna adapter under `devil/adapter/echidna/`.
 - [ ] Implement the Halmos adapter under `devil/adapter/halmos/`.
 - [ ] Replace the `DYLD_LIBRARY_PATH` workaround with a portable Foundry setup documented for CI.
+
+---
+
+### 2026-08-07 — Changelog Maintenance
+
+#### Current State
+- Project-local Python toolchain is locked in `uv.lock` and runs through `uv run`.
+- Echidna is installed locally under `.tools/bin/` and is intentionally ignored by Git.
+- Foundry fork compilation is verified with the documented per-command libusb path.
+- Dependency setup and documentation were published in commit `26b3256`.
+
+#### Next Development Tasks
+- [ ] Implement the Echidna adapter under `devil/adapter/echidna/`.
+- [ ] Implement the Halmos adapter under `devil/adapter/halmos/`.
+- [ ] Add adapter smoke tests using deterministic fixtures.
+- [ ] Implement the full `.t.sol` invariant loader.
+- [ ] Implement the predicate expression engine.
