@@ -1,0 +1,51 @@
+name: Issue Labeler
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const title = (issue.title || '').toLowerCase();
+            const body = (issue.body || '').toLowerCase();
+            const text = `${title} ${body}`;
+
+            const rules = [
+              { label: 'bug',          patterns: ['bug', 'error', 'crash', 'fail', 'broken', 'fix', 'regression', 'exception'] },
+              { label: 'feature',      patterns: ['feature', 'request', 'add', 'implement', 'new', 'proposal', 'enhancement'] },
+              { label: 'docs',         patterns: ['doc', 'documentation', 'readme', 'typo', 'example'] },
+              { label: 'question',     patterns: ['question', 'how to', 'help', '?', 'support'] },
+              { label: 'ci-cd',        patterns: ['ci', 'cd', 'pipeline', 'workflow', 'github actions', 'action'] },
+              { label: 'adapter',      patterns: ['echidna', 'halmos', 'slither', 'adapter', 'tool'] },
+              { label: 'relay',        patterns: ['relay', 'bridge', 'cross-chain', 'message', 'vaa'] },
+              { label: 'invariant',    patterns: ['invariant', 'property', 'assert', 'nat spec', 'predicate'] },
+              { label: 'cli',          patterns: ['cli', 'command', 'argparse', 'flag', 'option'] },
+              { label: 'search',       patterns: ['search', 'frontier', 'score', 'ranking', 'branching'] },
+            ];
+
+            const labels = new Set();
+            for (const rule of rules) {
+              if (rule.patterns.some(p => text.includes(p))) {
+                labels.add(rule.label);
+              }
+            }
+
+            if (labels.size > 0) {
+              await github.rest.issues.addLabels({
+                ...context.repo,
+                issue_number: issue.number,
+                labels: [...labels],
+              });
+              console.log(`Added labels: ${[...labels].join(', ')}`);
+            } else {
+              console.log('No matching labels found');
+            }
