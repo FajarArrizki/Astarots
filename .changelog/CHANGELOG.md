@@ -90,3 +90,30 @@ devil/
 - Invariant IR: TransitionPredicate, CorrelationExtractor, Binding, QuantifiedPredicate
 - Algorithm: unified frontier, branch-local GlobalState, WitnessState, baseline evaluation
 - Adapter protocol: ToolCapabilities, typed Outcome, relay mode classification
+
+
+---
+
+### 2026-08-07 — Project-Local Toolchain
+
+#### Completed
+- [x] Added `slither-analyzer>=0.11.6` to the `dev` dependency group.
+- [x] Added `halmos>=0.3.3` to the `dev` dependency group.
+- [x] Regenerated `uv.lock`; Slither `0.11.6` and Halmos `0.3.3` are resolved locally.
+- [x] Installed and verified Echidna `2.3.3` under ignored `.tools/bin/` with the official macOS x86_64 SHA-256 checksum.
+- [x] Verified `uv run slither --version`.
+- [x] Verified `uv run halmos --version`.
+- [x] Verified `.tools/bin/echidna --version`.
+- [x] Fixed Forge execution without a global library change by supplying `DYLD_LIBRARY_PATH="$(brew --prefix libusb)/lib"` per command.
+- [x] Compiled Wormhole `Mainet/fork-test/` successfully with Forge `1.7.1`.
+- [x] Updated [`doch/.initial/Depedensi/README.md`](../doch/.initial/Depedensi/README.md) with versions, installation commands, lockfile policy, checksums, and status.
+
+#### Policy
+- Python packages belong in `pyproject.toml` and `uv.lock`; run them with `uv run`.
+- Native binaries do not belong in `uv.lock`; keep verified project-local binaries under `.tools/`.
+- `.tools/` is ignored so downloaded binaries and caches are never committed.
+
+#### Remaining
+- [ ] Implement the Echidna adapter under `devil/adapter/echidna/`.
+- [ ] Implement the Halmos adapter under `devil/adapter/halmos/`.
+- [ ] Replace the `DYLD_LIBRARY_PATH` workaround with a portable Foundry setup documented for CI.

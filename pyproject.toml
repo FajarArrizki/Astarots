@@ -8,8 +8,10 @@ dependencies = []
 
 [dependency-groups]
 dev = [
+    "halmos>=0.3.3",
     "pytest>=8",
     "ruff>=0.12",
+    "slither-analyzer>=0.11.6",
 ]
 
 [tool.pytest.ini_options]

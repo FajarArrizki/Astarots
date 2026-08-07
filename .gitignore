@@ -10,5 +10,6 @@ wheels/
 .venv
 
 .github/
+.tools/
 
 AGENT.md
