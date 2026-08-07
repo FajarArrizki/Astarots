@@ -15,7 +15,15 @@ import logging
 import subprocess
 from pathlib import Path
 
-from devil.adapter.protocol import ExecutionResult, ToolCapabilities
+from devil.adapter.protocol import (
+    ArtifactRef,
+    Diagnostic,
+    ExecutionResult,
+    StaticHint,
+    ToolCapabilities,
+    ToolRunResult,
+    artifact_digest,
+)
 from devil.core.types import (
     Call,
     ChainId,
@@ -38,15 +46,14 @@ class SlitherAdapter:
     """Wraps Slither for cross-chain invariant probe mode.
 
     Slither cannot execute or independently confirm counterexamples.
-    Those methods raise NotImplementedError — the scheduler must route
-    execute/confirm to tools with concrete_replay or symbolic_execution
-    capability.
     """
 
     capabilities: ToolCapabilities = SLITHER_CAPABILITIES
 
-    def __init__(self, slither_binary: str = "slither") -> None:
+    def __init__(self, slither_binary: str = "slither", *, timeout: int = 300) -> None:
         self._binary = slither_binary
+        self._timeout = timeout
+        self.last_result: ToolRunResult[list[StaticHint]] | None = None
 
     # ── probe ────────────────────────────────────────────────────────────
 
@@ -64,33 +71,53 @@ class SlitherAdapter:
         """
         target_path = Path(target)
         if not target_path.exists():
-            logger.error("Target not found: %s", target)
-            return Outcome.TOOL_ERROR
+            return self._finish(
+                ToolRunResult(
+                    Outcome.TOOL_ERROR, diagnostics=(Diagnostic(f"target not found: {target}"),)
+                )
+            )
 
         try:
             result = subprocess.run(
                 [self._binary, str(target_path), "--json", "-"],
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=self._timeout,
+                check=False,
             )
-        except subprocess.TimeoutExpired:
-            logger.error("Slither timed out on %s", target)
-            return Outcome.TIMEOUT
+        except subprocess.TimeoutExpired as exc:
+            return self._finish(ToolRunResult(Outcome.TIMEOUT, diagnostics=(Diagnostic(str(exc)),)))
         except OSError as exc:
-            logger.error("Slither not found or failed to start: %s", exc)
-            return Outcome.TOOL_ERROR
+            return self._finish(
+                ToolRunResult(Outcome.TOOL_ERROR, diagnostics=(Diagnostic(str(exc), "error"),))
+            )
 
         if result.returncode != 0:
-            logger.warning(
-                "Slither exited %d on %s: %s",
-                result.returncode, target, result.stderr[:200],
-            )
-            return Outcome.TOOL_ERROR
+            diagnostic = Diagnostic(result.stderr.strip() or "Slither exited non-zero", "error")
+            return self._finish(ToolRunResult(Outcome.TOOL_ERROR, diagnostics=(diagnostic,)))
 
         parsed = self._parse_output(result.stdout)
-        _hints = self._extract_cross_chain_hints(parsed, chain)
-        return Outcome.SUCCESS
+        raw_hints = self._extract_cross_chain_hints(parsed, chain)
+        hints = tuple(
+            StaticHint(
+                context_id=str(item["chain"]),
+                selector=str(item["function"]),
+                kind=_hint_kind(str(item["detector"])),
+                suspicion=_suspicion(str(item["severity"])),
+                producer="slither",
+            )
+            for item in raw_hints
+        )
+        result_value = ToolRunResult(
+            Outcome.SUCCESS,
+            list(hints),
+            artifacts=(ArtifactRef("static_hint", artifact_digest(raw_hints)),),
+        )
+        return self._finish(result_value)
+
+    def _finish(self, result: ToolRunResult[list[StaticHint]]) -> Outcome:
+        self.last_result = result
+        return result.outcome
 
     # ── execute (not supported) ──────────────────────────────────────────
 
@@ -101,9 +128,11 @@ class SlitherAdapter:
         constraints: tuple[Constraint, ...] = (),
         chain: ChainId | None = None,
     ) -> ExecutionResult:
-        """Slither cannot execute. Route to a concrete_replay tool."""
-        raise NotImplementedError(
-            "Slither cannot execute. Use a tool with concrete_replay capability."
+        """Slither cannot execute; the canonical executor owns replay."""
+        return ExecutionResult(
+            reachable=False,
+            outcome=Outcome.UNSUPPORTED,
+            revert_reason="Slither cannot execute; use the canonical executor",
         )
 
     # ── confirm (not applicable) ─────────────────────────────────────────
@@ -143,13 +172,15 @@ class SlitherAdapter:
                 continue
 
             for element in detector.get("elements", []):
-                hints.append({
-                    "detector": check,
-                    "function": element.get("name", ""),
-                    "description": detector.get("description", ""),
-                    "severity": detector.get("impact", "Medium"),
-                    "chain": str(chain) if chain else "",
-                })
+                hints.append(
+                    {
+                        "detector": check,
+                        "function": element.get("name", ""),
+                        "description": detector.get("description", ""),
+                        "severity": detector.get("impact", "Medium"),
+                        "chain": str(chain) if chain else "",
+                    }
+                )
 
         return hints
 
@@ -165,4 +196,19 @@ class SlitherAdapter:
             "arbitrary-send",
             "controlled-delegatecall",
         }
-        return any(r in check.lower() for r in relevant)
+        return any(item in check.lower() for item in relevant)
+
+
+def _hint_kind(detector: str) -> str:
+    lowered = detector.lower()
+    if "reentrancy" in lowered or "unchecked" in lowered:
+        return "EXTERNAL_CALL"
+    if "access-control" in lowered:
+        return "ACCESS_GAP"
+    return "OTHER"
+
+
+def _suspicion(severity: str) -> float:
+    return {"high": 0.9, "medium": 0.65, "low": 0.35, "informational": 0.15}.get(
+        severity.lower(), 0.5
+    )

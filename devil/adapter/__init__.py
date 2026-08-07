@@ -3,6 +3,24 @@
 Each adapter lives in its own subpackage under devil/adapter/<tool>/.
 """
 
-from devil.adapter.protocol import ArtifactStore, ExecutionResult, ToolAdapter, ToolCapabilities
+from devil.adapter.protocol import (
+    ArtifactRef,
+    ArtifactStore,
+    Diagnostic,
+    ExecutionResult,
+    StaticHint,
+    ToolAdapter,
+    ToolCapabilities,
+    ToolRunResult,
+)
 
-__all__ = ["ArtifactStore", "ExecutionResult", "ToolAdapter", "ToolCapabilities"]
+__all__ = [
+    "ArtifactRef",
+    "ArtifactStore",
+    "Diagnostic",
+    "ExecutionResult",
+    "StaticHint",
+    "ToolAdapter",
+    "ToolCapabilities",
+    "ToolRunResult",
+]

@@ -39,9 +39,7 @@ class EvidenceStrength(StrEnum):
     OBSERVED = "observed"
     REPLAYED = "replayed"
     SYMBOLICALLY_CONFIRMED = "symbolically_confirmed"
-    SYMBOLICALLY_CONFIRMED_UNDER_PROJECTED_STATE = (
-        "symbolically_confirmed_under_projected_state"
-    )
+    SYMBOLICALLY_CONFIRMED_UNDER_PROJECTED_STATE = "symbolically_confirmed_under_projected_state"
 
 
 class Outcome(StrEnum):
@@ -266,7 +264,7 @@ class Impact:
 
 @dataclass(frozen=True)
 class RelayMessage:
-    """A single Wormhole cross-chain message (VAA)."""
+    """A single cross-chain relay message with provenance identity."""
 
     emitter: str
     sequence: int
@@ -275,6 +273,13 @@ class RelayMessage:
     vaa_hash: str = ""
     guardian_set_index: int = 0
     destination_status: str = "unknown"  # delivered | pending | expired | unknown
+    message_id: str = ""
+    source_event_hash: str = ""
+    attestation_hash: str = ""
+
+    @property
+    def identity(self) -> str:
+        return self.message_id or f"{self.emitter}:{self.sequence}"
 
 
 @dataclass(frozen=True)

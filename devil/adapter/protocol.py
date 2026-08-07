@@ -6,8 +6,10 @@ adapters through this protocol — never calls tools directly.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from devil.core.types import (
     Call,
@@ -36,6 +38,53 @@ class ToolCapabilities:
     shrinking: bool = False
     supported_targets: tuple[str, ...] = ("solidity",)
     supported_artifacts: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ArtifactRef:
+    """Content-addressed reference to a normalized tool artifact."""
+
+    kind: str
+    digest: str
+    path: str = ""
+
+
+@dataclass(frozen=True)
+class Diagnostic:
+    """Structured tool diagnostic retained alongside normalized output."""
+
+    message: str
+    severity: str = "warning"
+
+
+@dataclass(frozen=True)
+class StaticHint:
+    """Cross-chain-relevant static finding used to seed dynamic probing."""
+
+    context_id: str
+    selector: str
+    kind: str
+    source_locations: tuple[str, ...] = ()
+    constraints: tuple[Constraint, ...] = ()
+    suspicion: float = 0.0
+    producer: str = ""
+
+
+@dataclass(frozen=True)
+class ToolRunResult[T]:
+    """Uniform typed result envelope for every adapter operation."""
+
+    outcome: Outcome
+    value: T | None = None
+    evidence: tuple[Evidence, ...] = ()
+    artifacts: tuple[ArtifactRef, ...] = ()
+    diagnostics: tuple[Diagnostic, ...] = ()
+    bounds: dict[str, Any] | None = None
+
+
+def artifact_digest(payload: Any) -> str:
+    encoded = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 # ── Execution Result ─────────────────────────────────────────────────────────

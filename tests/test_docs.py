@@ -38,9 +38,8 @@ def test_all_doch_links_resolve(doch_dir):
                 continue
             broken.append((str(md_file.relative_to(doch_dir.parent)), link))
 
-    assert not broken, (
-        f"Found {len(broken)} broken link(s) in documentation:\n"
-        + "\n".join(f"  {file} → {link}" for file, link in broken)
+    assert not broken, f"Found {len(broken)} broken link(s) in documentation:\n" + "\n".join(
+        f"  {file} → {link}" for file, link in broken
     )
 
 
@@ -57,13 +56,7 @@ def test_index_covers_all_docs(doch_dir):
             continue
         linked.add(target.split("/")[0])
 
-    top_dirs = {
-        d.name
-        for d in doch_dir.iterdir()
-        if d.is_dir() and not d.name.startswith(".")
-    }
+    top_dirs = {d.name for d in doch_dir.iterdir() if d.is_dir() and not d.name.startswith(".")}
 
     missing = top_dirs - linked
-    assert not missing, (
-        f"doch/README.md missing links to: {missing}"
-    )
+    assert not missing, f"doch/README.md missing links to: {missing}"

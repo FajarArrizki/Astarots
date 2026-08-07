@@ -1,5 +1,20 @@
 """Astarots core — shared kernel types and configuration."""
 
+from devil.core.config import (
+    CampaignConfig,
+    ChainConfig,
+    ChainRegistry,
+    TargetConfig,
+    load_campaign,
+)
+from devil.core.relay import RelayDelivery, RelayError, RelayLedger
+from devil.core.snapshot import (
+    BaseForkFingerprint,
+    SnapshotError,
+    SnapshotSet,
+    advance_environment,
+    apply_slot_changes,
+)
 from devil.core.types import (
     Actor,
     AttackerModel,
@@ -52,4 +67,17 @@ __all__ = [
     "Verdict",
     "ViolationSource",
     "WitnessState",
+    "BaseForkFingerprint",
+    "CampaignConfig",
+    "ChainConfig",
+    "ChainRegistry",
+    "RelayDelivery",
+    "RelayError",
+    "RelayLedger",
+    "SnapshotError",
+    "SnapshotSet",
+    "TargetConfig",
+    "advance_environment",
+    "apply_slot_changes",
+    "load_campaign",
 ]

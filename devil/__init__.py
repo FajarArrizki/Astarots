@@ -1,0 +1,1 @@
+"""Astarots application package."""
