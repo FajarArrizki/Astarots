@@ -10,6 +10,7 @@ from devil.core.types import (
     Candidate,
     ChainId,
     ExecutionStatus,
+    ForkSnapshot,
     GlobalState,
     MessageStatus,
     Outcome,
@@ -24,7 +25,7 @@ from devil.harness.evaluation import (
     evaluate_transition_monitors,
 )
 from devil.harness.executor import BackendCallResult, CanonicalForkExecutor
-from devil.harness.search import SearchConfig, UnifiedSearch, canonical_state_hash
+from devil.harness.search import SearchConfig, UnifiedFrontier, UnifiedSearch, canonical_state_hash
 from devil.invariant.expression import parse_expression
 from devil.invariant.ir import (
     Binding,
@@ -360,3 +361,67 @@ def test_pinned_two_chain_workflow_is_deterministic_across_two_runs(
         )
 
     assert run_once() == run_once()
+
+
+def test_score_candidate_weights_evidence_and_depth(
+    snapshot_set, actor_policy, relay_dataset
+) -> None:
+    invariant = _invariant()
+    executor, _ = _executor(snapshot_set, actor_policy, relay_dataset)
+    from devil.core.types import Evidence
+
+    base = Candidate("target", suspicion=0.5)
+    with_evidence = Candidate(
+        "target",
+        suspicion=0.5,
+        evidence=Evidence("tool", Outcome.SUCCESS, "raw"),
+        chain=ChainId.ETHEREUM,
+    )
+    search = UnifiedSearch(
+        invariant=invariant,
+        executor=executor,
+        propose=lambda state: (),
+    )
+    score_base = search._score_candidate(base, depth=0)
+    score_evidence = search._score_candidate(with_evidence, depth=0)
+    assert score_evidence > score_base
+    score_deep = search._score_candidate(base, depth=5)
+    assert score_deep < score_base
+
+
+def test_frontier_prevents_consecutive_same_chain_expansions() -> None:
+    frontier = UnifiedFrontier(max_consecutive=2)
+    state_a = SearchState(
+        GlobalState(chain_snapshots={ChainId.ETHEREUM: ForkSnapshot(ChainId.ETHEREUM, 1)}),
+        ChainId.ETHEREUM,
+    )
+    state_b = SearchState(
+        GlobalState(chain_snapshots={ChainId.POLYGON: ForkSnapshot(ChainId.POLYGON, 1)}),
+        ChainId.POLYGON,
+    )
+    frontier.push(state_a, 1.0)
+    frontier.push(state_b, 0.5)
+    first = frontier.pop()
+    second = frontier.pop()
+    assert first.chain_context == ChainId.ETHEREUM
+    assert second.chain_context == ChainId.POLYGON
+
+
+def test_frontier_custom_chain_equality_in_fairness() -> None:
+    frontier = UnifiedFrontier(max_consecutive=1)
+    state_a = SearchState(
+        GlobalState(chain_snapshots={ChainId("custom"): ForkSnapshot(ChainId("custom"), 1)}),
+        ChainId("custom"),
+    )
+    state_b = SearchState(
+        GlobalState(chain_snapshots={ChainId.ETHEREUM: ForkSnapshot(ChainId.ETHEREUM, 1)}),
+        ChainId.ETHEREUM,
+    )
+    frontier.push(state_a, 1.0)
+    frontier.push(state_b, 0.5)
+    first = frontier.pop()
+    second = frontier.pop()
+    chains = [first.chain_context, second.chain_context]
+    assert ChainId("custom") in chains
+    assert ChainId.ETHEREUM in chains
+    assert first.chain_context != second.chain_context

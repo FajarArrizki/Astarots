@@ -26,7 +26,7 @@ from devil.invariant.ir import load_invariant
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="astarots")
-    parser.add_argument("--version", action="version", version="astarots 1.0.0")
+    parser.add_argument("--version", action="version", version="astarots 0.1.0")
     commands = parser.add_subparsers(dest="command", required=True)
 
     chain = commands.add_parser("chain", help="manage pinned chain configuration")
@@ -39,6 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--expected-block-hash", default="")
     add.add_argument("--expected-state-root", default="")
     add.add_argument("--config", type=Path, default=Path("astarots.toml"))
+    rm = chain_commands.add_parser("rm", help="remove a chain entry")
+    rm.add_argument("alias")
+    rm.add_argument("--config", type=Path, default=Path("astarots.toml"))
     chain_commands.add_parser("list", help="list configured chains").add_argument(
         "--config", type=Path, default=Path("astarots.toml")
     )
@@ -120,6 +123,17 @@ def _chain(args: argparse.Namespace) -> int:
         chains[args.alias] = entry
         args.config.write_text(tomlkit.dumps(document), encoding="utf-8")
         _emit({"chain": args.alias, "config": str(args.config)}, pretty=False)
+        return 0
+    if args.chain_command == "rm":
+        document = _toml_document(args.config)
+        chains = document.get("chains", {})
+        if args.alias not in chains:
+            raise KeyError(f"unknown chain {args.alias!r}")
+        del chains[args.alias]
+        if not chains:
+            document.remove("chains")
+        args.config.write_text(tomlkit.dumps(document), encoding="utf-8")
+        _emit({"removed": args.alias, "config": str(args.config)}, pretty=False)
         return 0
     config = load_campaign(args.config)
     _emit(

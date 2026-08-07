@@ -66,7 +66,7 @@ class EchidnaAdapter:
         chain: ChainId,
         **options: Any,
     ) -> ToolRunResult[list[ProbeArtifact]]:
-        if projection.chain_id is not chain:
+        if projection.chain_id != chain:
             return _unsupported("projection chain does not match requested chain")
         fork = options.get("fork_config")
         if not isinstance(fork, EchidnaForkConfig):

@@ -90,13 +90,13 @@ class UnifiedFrontier:
         if (
             self._last_chain is not None
             and self._consecutive >= self._max_consecutive
-            and any(item[2].chain_context is not self._last_chain for item in self._heap)
+            and any(item[2].chain_context != self._last_chain for item in self._heap)
         ):
             selected = min(
                 (
                     index
                     for index, item in enumerate(self._heap)
-                    if item[2].chain_context is not self._last_chain
+                    if item[2].chain_context != self._last_chain
                 ),
                 key=lambda index: self._heap[index][:2],
             )
@@ -106,7 +106,7 @@ class UnifiedFrontier:
         else:
             self._heap[selected] = self._heap.pop()
             heapq.heapify(self._heap)
-        if state.chain_context is self._last_chain:
+        if state.chain_context == self._last_chain:
             self._consecutive += 1
         else:
             self._last_chain = state.chain_context
@@ -119,6 +119,13 @@ class UnifiedFrontier:
 
 class UnifiedSearch:
     """Replay every candidate step through the canonical executor and evaluate it."""
+
+    # Multi-factor scoring weights (calibrated for cross-chain search).
+    _W_SUSPICION = 1.0
+    _W_DEPTH_DECAY = 0.15
+    _W_EVIDENCE = 0.25
+    _W_CROSS_CHAIN = 0.20
+    _W_SEQUENCE_LEN = 0.05
 
     def __init__(
         self,
@@ -136,6 +143,15 @@ class UnifiedSearch:
         self.observations = observations or ObservationSetEvaluator(
             invariant.observation_set.max_items
         )
+
+    def _score_candidate(self, candidate: Candidate, depth: int) -> float:
+        """Multi-factor suspicion score for ranking candidates."""
+        base = candidate.suspicion * self._W_SUSPICION
+        depth_penalty = depth * self._W_DEPTH_DECAY
+        evidence_bonus = self._W_EVIDENCE if candidate.evidence is not None else 0.0
+        chain_bonus = self._W_CROSS_CHAIN if candidate.chain is not None else 0.0
+        seq_bonus = min(len(candidate.call_sequence) * self._W_SEQUENCE_LEN, 0.3)
+        return base - depth_penalty + evidence_bonus + chain_bonus + seq_bonus
 
     def run(self, initial: SearchState, *, baseline: BaselineResult) -> SearchResult:
         frontier = UnifiedFrontier(self.config.max_consecutive_expansions_per_chain)
@@ -206,7 +222,10 @@ class UnifiedSearch:
             )
             ranked = sorted(
                 candidates,
-                key=lambda candidate: (-candidate.suspicion, trace_hash(candidate.call_sequence)),
+                key=lambda candidate: (
+                    -self._score_candidate(candidate, state.depth),
+                    trace_hash(candidate.call_sequence),
+                ),
             )[: self.config.branching_cap(state.depth)]
             for candidate in ranked:
                 if budget_used >= self.config.max_states:

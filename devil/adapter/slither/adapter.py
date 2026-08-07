@@ -154,7 +154,7 @@ def _validate_identity(
     chain: ChainId,
     options: dict[str, Any],
 ) -> str:
-    if projection.chain_id is not chain:
+    if projection.chain_id != chain:
         return "projection chain does not match requested chain"
     if not context_id:
         return "Slither context_id is required"

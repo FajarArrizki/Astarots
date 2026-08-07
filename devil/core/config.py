@@ -544,7 +544,4 @@ def _is_address(value: str) -> bool:
 
 
 def chain_id_for(alias: str) -> ChainId:
-    try:
-        return ChainId(alias)
-    except ValueError as exc:
-        raise ValueError(f"unsupported built-in chain alias {alias!r}") from exc
+    return ChainId(alias)

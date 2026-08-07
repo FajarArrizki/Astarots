@@ -27,7 +27,7 @@ astarots probe \
     --relay-dataset artifacts/relay/messages.json \
     --relay-mode protocol-valid-synthetic \
     --relay-config astarots.relay.toml \
-    --tools echidna,halmos,slither \
+    --tool echidna --tool halmos --tool slither \
     --max-depth 8
 ```
 
@@ -69,20 +69,18 @@ Options:
   --target CONTEXT=ADDRESS    Deployed target, e.g. ethereum.bridge=0x...
   --artifact CONTEXT=PATH     Compiled ABI/storage-layout artifact for the context
   --source CONTEXT=PATH       Source target for source-level tools such as Slither
-  --invariants PATH           Directory containing invariant specifications
+  --invariant PATH            Invariant specification file or directory
   --relay-dataset PATH        Content-addressed message/attestation dataset
   --relay-mode MODE           historical-authentic, protocol-valid-synthetic,
                              modeled-relay, or raw-payload
   --relay-config PATH         Protocol adapter and local proof-fixture configuration
   --actor-policy PATH         Allowed actors, privileges, funding, impersonation
-  --tools LIST                Candidate/confirmation tools
+  --tool NAME                 Candidate/confirmation tool (repeatable)
   --max-depth N               Maximum global causal action depth (default: 8)
-  --branching-caps LIST       Per-depth candidate caps (default: 4,4,3,3,2,2,1,1)
   --max-states N              Global authoritative execution cap (default: 200)
   --timeout N                 Per-invariant timeout seconds (default: 600)
-  --output FORMAT             console or json (default: console)
-  --resume RUN_ID             Resume from a compatible persisted frontier
-  --focus FUNCTION            Restrict to one invariant
+  --output PATH               Output directory for JSON reports
+  --json                      Emit JSON to stdout
   --dry-run                   Validate targets, snapshots, IR, and datasets
 ```
 
@@ -111,16 +109,10 @@ Every address, runtime code hash, proxy implementation, and artifact hash is val
 Re-execute a previously found cross-chain edge case. Uses deterministic twin-state replay (multi-fork or twin database).
 
 ```
-astarots replay [OPTIONS]
-
-Options:
-  --edge-case PATH           Saved finding with fingerprints and ActionTrace
-  --target CONTEXT=ADDRESS   Optional replacement/fixed deployment
-  --artifact CONTEXT=PATH    Artifact for a replacement target
-  --output PATH              Replay trace destination
+astarots replay PATH [--config PATH] [--replacement CONTEXT=ADDRESS] [--json]
 ```
 
-A replacement target must provide every selector used by the recorded trace and pass artifact, runtime-code, proxy-kind, and implementation validation. Any ABI or proxy mismatch is an invalid replay configuration, not an execution failure.
+The `path` argument points to a directory of replay artifacts (`.json` + `.t.sol` pairs) or a single metadata JSON file. A replacement target must provide every selector used by the recorded trace and pass artifact, runtime-code, proxy-kind, and implementation validation. Any ABI or proxy mismatch is an invalid replay configuration, not an execution failure.
 
 ### `list-tools`
 
@@ -143,14 +135,30 @@ Output:
 Scaffold a parser-only cross-chain invariant specification bound to existing deployments:
 
 ```
-astarots init \
-    --target ethereum.bridge=0xEthBridge \
-    --artifact ethereum.bridge=out/IBridgeEth.sol/IBridgeEth.json \
-    --target polygon.bridge=0xPolyBridge \
-    --artifact polygon.bridge=out/IBridgePoly.sol/IBridgePoly.json
+astarots init [--template lock-mint|generic] [--targets N]
 ```
 
 The generated `.t.sol` file contains NatSpec IR plus a human-readable assertion. Astarots generates executable per-chain harnesses; it does not deploy the targets.
+
+### `validate`
+
+Validate config, invariant IR, and fork identities without running a probe:
+
+```
+astarots validate [--config PATH] [--invariant PATH] [--json]
+```
+
+Checks that all chains are configured, targets reference valid chains, relay/actor policies are present, snapshot fingerprints verify against RPCs, and invariant IR parses correctly.
+
+### `forks`
+
+Print verified snapshot fingerprints for all configured chains:
+
+```
+astarots forks [--config PATH] [--json]
+```
+
+Outputs chain IDs, block numbers, block hashes, state roots, and fork cache hashes — useful for debugging snapshot coherence issues.
 
 ---
 
@@ -172,10 +180,8 @@ Environment references are interpolated **after** precedence selects the winning
 | Code | Meaning |
 |---|---|
 | 0 | No violations found (verdict: not-observed for all invariants) |
-| 1 | Violation found (verdict: violated for at least one invariant, regardless of other results) |
-| 2 | Inconclusive (no violation found, but at least one invariant was inconclusive — timeout, partial, or tool error) |
-| 3 | Invalid configuration (missing chains, invalid invariant IR, missing NatSpec metadata) |
-| 4 | Tool execution error (all probes failed — no results at all) |
+| 1 | Violation found (verdict: violated for at least one invariant) |
+| 2 | Error (exception during execution — invalid config, tool error, or runtime failure) |
 
 ---
 
@@ -189,12 +195,6 @@ rpc_env = "ETH_RPC_URL"
 ```
 
 The harness resolves it only when spawning the fork backend, redacts process diagnostics, and never records the URL or secret value. CLI uses `--rpc-env ETH_RPC_URL`, not `--rpc "$ETH_RPC_URL"`.
-
-## Cache and Resume
-
-`astarots probe --resume RUN_ID` reuses immutable RPC fetch caches, tool corpora, and a persisted frontier. The cache key includes project revision, effective configuration hash, tool versions, `SnapshotSet` fingerprints, target hashes, relay dataset/policy hashes, actor policy hash, and invariant IR hash.
-
-Frontier entries store `ActionTrace`, score, lineage, and budget metadata—not process-local fork handles. Resume reconstructs every branch by canonical replay from the recorded bases. A key or fingerprint mismatch is an invalid configuration and starts no work; users must choose a new run instead of silently mixing state.
 
 ---
 
@@ -227,8 +227,7 @@ astarots probe \
     --artifact ethereum.bridge=out/IBridgeEth.sol/IBridgeEth.json \
     --target polygon.bridge=0xPolyBridge \
     --artifact polygon.bridge=out/IBridgePoly.sol/IBridgePoly.json \
-    --focus invariant_locked_equals_minted \
-    --tools slither,echidna
+    --tool slither --tool echidna
 ```
 
 ---

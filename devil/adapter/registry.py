@@ -180,7 +180,7 @@ class CandidateWorkers:
         for step in candidate.call_sequence:
             if not hasattr(step, "context_id"):
                 continue
-            if step.chain is not projection.chain_id:
+            if step.chain != projection.chain_id:
                 return "candidate step chain differs from projection"
             if not step.context_id or step.context_id not in projection.base_fingerprint.targets:
                 return "candidate step references an unverified context"

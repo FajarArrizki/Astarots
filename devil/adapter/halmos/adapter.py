@@ -71,7 +71,7 @@ class HalmosAdapter:
         chain: ChainId,
         **options: Any,
     ) -> ToolRunResult[BoundedConfirmation]:
-        if witness_projection.chain_projection.chain_id is not chain:
+        if witness_projection.chain_projection.chain_id != chain:
             return ToolRunResult(
                 Outcome.UNSUPPORTED,
                 diagnostics=(Diagnostic("witness projection chain mismatch"),),

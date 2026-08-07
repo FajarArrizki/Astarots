@@ -31,7 +31,7 @@ def decompose(invariant: CrossChainInvariant) -> tuple[SubInvariant, ...]:
     chains = sorted({context.chain_id for context in invariant.contexts.values()}, key=str)
     for chain in chains:
         contexts = tuple(
-            context for context in invariant.contexts.values() if context.chain_id is chain
+            context for context in invariant.contexts.values() if context.chain_id == chain
         )
         context_ids = {context.context_id for context in contexts}
         transitions = tuple(

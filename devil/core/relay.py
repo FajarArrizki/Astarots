@@ -196,14 +196,11 @@ class MessageCoordinator:
         except KeyError as exc:
             raise RelayError(f"unknown message {transition.message_id!r}") from exc
         envelope = message_state.envelope
-        if transition.source_chain is not envelope.source_chain:
+        if transition.source_chain != envelope.source_chain:
             raise RelayError("relay transition source chain mismatch")
-        if transition.destination_chain is not envelope.destination_chain:
+        if transition.destination_chain != envelope.destination_chain:
             raise RelayError("relay transition destination chain mismatch")
-        if (
-            transition.relay_mode is not self.policy.mode
-            or transition.policy_ref != self.policy_hash
-        ):
+        if transition.relay_mode != self.policy.mode or transition.policy_ref != self.policy_hash:
             raise RelayError("relay transition policy identity mismatch")
         if message_state.status is not transition.from_status:
             raise RelayError(

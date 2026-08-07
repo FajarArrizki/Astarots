@@ -16,6 +16,13 @@ class ChainId(StrEnum):
     OPTIMISM = "optimism"
     FANTOM = "fantom"
 
+    @classmethod
+    def _missing_(cls, value: str) -> ChainId:
+        obj = str.__new__(cls, value)
+        obj._name_ = value
+        obj._value_ = value
+        return obj
+
 
 class Verdict(StrEnum):
     VIOLATED = "violated"

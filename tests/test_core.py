@@ -50,6 +50,24 @@ def test_global_state_is_defensively_and_deeply_immutable() -> None:
         state.chain_snapshots[ChainId.POLYGON] = ForkSnapshot(ChainId.POLYGON, 200)  # type: ignore[index]
 
 
+def test_chain_id_allows_custom_chain_aliases() -> None:
+    custom = ChainId("avalanche")
+    assert custom == "avalanche"
+    assert str(custom) == "avalanche"
+    assert ChainId("avalanche") == custom
+    built_in = ChainId.ETHEREUM
+    assert built_in == "ethereum"
+    assert ChainId(built_in) == built_in
+
+
+def test_chain_id_equality_works_for_custom_chains() -> None:
+    a = ChainId("bsc")
+    b = ChainId("bsc")
+    assert a == b
+    assert a != ChainId("avalanche")
+    assert {a: 1, b: 2} == {ChainId("bsc"): 2}
+
+
 def test_snapshot_overlay_preserves_base_and_changes_identity(snapshot_set) -> None:
     original = snapshot_set.snapshot(ChainId.ETHEREUM)
     changed = replace(

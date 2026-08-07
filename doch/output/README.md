@@ -36,7 +36,7 @@ CrossChainEdgeCase
 ├── finding_id
 ├── invariant
 ├── verdict: violated | not-observed | inconclusive
-├── violation_source: pre_existing_at_snapshot | introduced_by_trace | amplified_by_trace
+├── violation_source: pre_existing_at_snapshot | introduced_by_trace | amplified_by_trace | inconclusive_due_to_missing_relay_data
 ├── violated_clauses: local monitor rule IDs and/or global_property
 ├── aggregate_strength
 ├── segment_strengths: Map[TraceSegmentId, EvidenceStrength]

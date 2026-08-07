@@ -102,3 +102,53 @@ def test_list_tools_reports_availability_as_json(capsys) -> None:
         "slither",
     }
     assert all("version" in row and "path" in row for row in rows)
+
+
+def test_chain_rm_removes_entry_from_toml(tmp_path: Path, capsys) -> None:
+    config = tmp_path / "astarots.toml"
+    main(
+        [
+            "chain",
+            "add",
+            "ethereum",
+            "--rpc-env",
+            "ETH_RPC_URL",
+            "--chain-id",
+            "1",
+            "--fork-block",
+            "100",
+            "--config",
+            str(config),
+        ]
+    )
+    main(
+        [
+            "chain",
+            "add",
+            "polygon",
+            "--rpc-env",
+            "POLY_RPC_URL",
+            "--chain-id",
+            "137",
+            "--fork-block",
+            "200",
+            "--config",
+            str(config),
+        ]
+    )
+    assert "[chains.ethereum]" in config.read_text()
+    assert "[chains.polygon]" in config.read_text()
+
+    capsys.readouterr()  # clear buffer
+    assert main(["chain", "rm", "ethereum", "--config", str(config)]) == 0
+    rendered = config.read_text()
+    assert "[chains.ethereum]" not in rendered
+    assert "[chains.polygon]" in rendered
+    result = json.loads(capsys.readouterr().out)
+    assert result["removed"] == "ethereum"
+
+
+def test_chain_rm_unknown_alias_fails(capsys) -> None:
+    config = Path("/nonexistent/astarots.toml")
+    assert main(["chain", "rm", "nonexistent", "--config", str(config)]) == 2
+    assert "unknown chain" in capsys.readouterr().err
