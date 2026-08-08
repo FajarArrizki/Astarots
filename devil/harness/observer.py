@@ -6,7 +6,7 @@ import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from devil.core.snapshot import JsonRpcClient, SnapshotSet
+from devil.core.snapshot import JsonRpcClient, SnapshotSet, keccak_hex
 from devil.core.types import ChainId, GlobalState
 from devil.invariant.ir import (
     BindingReduce,
@@ -132,7 +132,7 @@ class EvmBindingObserver:
         slot = int(slot_text, 0)
         for argument in arguments:
             encoded = _encode_static(argument, "bytes32") + slot.to_bytes(32, "big")
-            digest = client.call("web3_sha3", ["0x" + encoded.hex()])
+            digest = keccak_hex(client, "0x" + encoded.hex())
             slot = int(str(digest), 16)
         return str(client.call("eth_getStorageAt", [address, hex(slot), "latest"]))
 
@@ -160,7 +160,7 @@ def _encode_call(client: JsonRpcClient, signature: str, arguments: list[Any]) ->
     if len(types) != len(arguments):
         raise ValueError(f"getter {signature!r} argument arity mismatch")
     signature_hex = "0x" + signature.encode().hex()
-    selector = str(client.call("web3_sha3", [signature_hex]))[:10]
+    selector = keccak_hex(client, signature_hex)[:10]
     encoded = b"".join(
         _encode_static(value, value_type)
         for value, value_type in zip(arguments, types, strict=True)

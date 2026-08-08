@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Cross-chain invariant testing harness — unified beam search over Echidna, Halmos, and Slither"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["tomlkit>=0.13.3"]
+dependencies = ["eth-hash[pycryptodome]>=0.7.0", "tomlkit>=0.13.3"]
 
 [project.scripts]
 astarots = "devil.cli:main"

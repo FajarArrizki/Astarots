@@ -9,7 +9,7 @@ import pytest
 
 from devil.core.config import load_campaign
 from devil.core.loaders import content_hash, load_actor_policy, load_relay_dataset
-from devil.core.snapshot import SnapshotError, verify_campaign_snapshots
+from devil.core.snapshot import SnapshotError, keccak_hex, verify_campaign_snapshots
 from devil.core.types import ChainId, ForkSnapshot, GlobalState, SlotChange
 from devil.invariant.expression import PredicateError, evaluate_predicate, parse_expression
 
@@ -38,6 +38,19 @@ class FakeRpc:
         if method == "web3_sha3":
             return "0xcode1" if self.chain_id == 1 else "0xcode2"
         raise AssertionError(method)
+
+
+def test_keccak_hex_falls_back_when_rpc_method_is_unavailable() -> None:
+    class RpcWithoutWeb3Sha3:
+        def call(self, method: str, params: list[object]) -> object:
+            if method == "web3_sha3":
+                raise RuntimeError("method not found")
+            raise AssertionError(method)
+
+    assert (
+        keccak_hex(RpcWithoutWeb3Sha3(), "0x616263")
+        == "0x4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45"
+    )
 
 
 def test_global_state_is_defensively_and_deeply_immutable() -> None:

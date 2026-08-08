@@ -11,6 +11,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
+from eth_hash.auto import keccak
+
 from devil.core.config import CampaignConfig, TargetConfig
 from devil.core.types import ChainId, ForkSnapshot, SlotChange, frozen_mapping
 
@@ -57,6 +59,16 @@ class JsonRpcClient:
         if "result" not in payload:
             raise SnapshotError(f"RPC {method} returned no result")
         return payload["result"]
+
+
+def keccak_hex(client: RpcClient, value: str) -> str:
+    """Hash hex data through RPC, falling back to local Ethereum Keccak-256."""
+    try:
+        result = client.call("web3_sha3", [value])
+    except Exception:
+        raw = bytes.fromhex(value.removeprefix("0x"))
+        return "0x" + keccak(raw).hex()
+    return str(result)
 
 
 @dataclass(frozen=True)
@@ -318,7 +330,7 @@ def _verify_target(
     code = str(client.call("eth_getCode", [target.address, block_tag]))
     if code in {"", "0x"}:
         raise SnapshotError(f"{target.context}: no deployed runtime code at pinned block")
-    code_hash = str(client.call("web3_sha3", [code]))
+    code_hash = keccak_hex(client, code)
     _require_expected(target.context, "runtime code hash", target.expected_code_hash, code_hash)
     artifact_hash = "sha256:" + hashlib.sha256(artifact_path.read_bytes()).hexdigest()
     implementation_address = ""
@@ -333,7 +345,7 @@ def _verify_target(
         implementation_code = str(client.call("eth_getCode", [implementation_address, block_tag]))
         if implementation_code in {"", "0x"}:
             raise SnapshotError(f"{target.context}: implementation has no code")
-        implementation_code_hash = str(client.call("web3_sha3", [implementation_code]))
+        implementation_code_hash = keccak_hex(client, implementation_code)
         _require_expected(
             target.context,
             "implementation code hash",

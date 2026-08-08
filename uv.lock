@@ -138,6 +138,7 @@ name = "astarots"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "eth-hash", extra = ["pycryptodome"] },
     { name = "tomlkit" },
 ]
 
@@ -150,7 +151,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "tomlkit", specifier = ">=0.13.3" }]
+requires-dist = [
+    { name = "eth-hash", extras = ["pycryptodome"], specifier = ">=0.7.0" },
+    { name = "tomlkit", specifier = ">=0.13.3" },
+]
 
 [package.metadata.requires-dev]
 dev = [

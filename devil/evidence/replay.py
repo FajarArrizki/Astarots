@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from devil.core.runtime import foundry_environment
-from devil.core.snapshot import BaseForkFingerprint, RpcClient
+from devil.core.snapshot import BaseForkFingerprint, RpcClient, keccak_hex
 from devil.core.types import Call, EnvironmentTransition, RelayTransition, WitnessState
 
 _SECRET = re.compile(r"(?:gh[pousr]_[A-Za-z0-9_]+|https?://[^\s/@:]+:[^\s/@]+@)")
@@ -180,7 +180,7 @@ class ReplayRunner:
                 code = client.call(
                     "eth_getCode", [target["address"], hex(fingerprint["block_number"])]
                 )
-                code_hash = client.call("web3_sha3", [code])
+                code_hash = keccak_hex(client, code)
                 if str(code_hash).lower() != str(target["runtime_code_hash"]).lower():
                     raise ValueError(f"{chain}: replay target code hash mismatch")
 
